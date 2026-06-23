@@ -2,8 +2,8 @@
   "mcpServers": {
     "graphiti": {
       "type": "http",
-      "url": "http://host.docker.internal:8765/mcp",
-      "description": "Shared temporal knowledge graph (Graphiti + Neo4j on host). Domain knowledge — decisions, incidents, vendor rules, client preferences, branch maps. MUST pass group_id on every call to namespace per project. See skills/graphiti-usage for write/query discipline."
+      "url": "${user_config.graphiti_url}",
+      "description": "Shared temporal knowledge graph (Graphiti + Neo4j on host). Domain knowledge — decisions, incidents, vendor rules, client preferences, branch maps. MUST pass group_id on every call to namespace per project. See skills/graphiti-usage for write/query discipline. URL is prompted at plugin enable time (userConfig.graphiti_url) — default is localhost, change to host.docker.internal for in-container consumers."
     }
   }
 }

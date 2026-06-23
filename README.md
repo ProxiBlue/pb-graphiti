@@ -19,7 +19,7 @@ Use both. Auto-memory for hard rules that MUST load every session. pb-graphiti f
 
 ```
 .claude-plugin/        plugin + marketplace manifest
-.mcp.json              MCP client config — points at http://host.docker.internal:8765/mcp/
+.mcp.json              MCP client config — URL prompted at enable time (default http://localhost:8765/mcp)
 skills/graphiti-usage/ SKILL.md — write/query discipline, group_id scope model
 infra/                 docker-compose recipe for the host-side Neo4j + Graphiti stack
 ```
@@ -53,8 +53,9 @@ Or for local development, clone and reference by path in `~/.claude/settings.jso
 
 ## Graphiti server. 
 
-The plugin's MCP config points at `http://host.docker.internal:8765/mcp/`. That endpoint is YOUR responsibility — run the bundled compose stack on your host (or any reachable host):
-We build own docker form their source as their supplied docker was dated at the making of this.
+The plugin's MCP config defaults to `http://localhost:8765/mcp` (overridable at enable time — see [URL: prompted at install time](#url-prompted-at-install-time) below). That endpoint is YOUR responsibility — run the bundled compose stack on your host (or any reachable host):
+
+We build our own docker image from upstream Graphiti source — the image they ship was stale at the time this plugin was made.
 
 ```bash
 cd infra/
@@ -87,21 +88,21 @@ curl -sS -X POST http://localhost:8765/mcp \
 
 Want different providers (Gemini for LLM, OpenAI embeddings, etc.)? Edit `infra/config/config.yaml` — the [Graphiti config schema](https://github.com/getzep/graphiti/blob/main/mcp_server/config/config.yaml) lists every supported provider.
 
-### URL form: pick the right one for where claude runs
+### URL: prompted at install time
 
-The plugin's default `.mcp.json` ships `http://host.docker.internal:8765/mcp` — correct for the **most common consumer**, claude running inside a container (DDEV, devcontainer, etc.).
+When you enable the plugin, Claude Code prompts for `graphiti_url`. Pick the form that matches **where Claude Code runs**, not where the docker stack runs:
 
-| Where claude runs | URL to use | Notes |
-|---|---|---|
-| DDEV container / devcontainer | `http://host.docker.internal:8765/mcp` | Plugin default. Linux Docker needs `host-gateway` in `extra_hosts` — DDEV does this automatically for `web`. |
-| Linux host (native) | `http://localhost:8765/mcp` | `host.docker.internal` does not resolve on a bare Linux host. |
-| macOS / Windows host (Docker Desktop) | either form works | Docker Desktop injects `host.docker.internal` into the host's hosts file. |
+| Where Claude Code runs | URL to enter |
+|---|---|
+| Same host as the docker-compose stack (most consumers) | `http://localhost:8765/mcp` *(default)* |
+| Inside a container that shares the docker host (DDEV, devcontainer) | `http://host.docker.internal:8765/mcp` |
 
-**Two things that will silently break the connection:**
-1. **Trailing slash.** The server 307-redirects `/mcp/` → `/mcp`; MCP HTTP clients typically don't follow 307 on POST. Always use `/mcp` (no slash).
-2. **Wrong host.** Using `host.docker.internal` from a Linux host → `Could not resolve host` → MCP shows "not connected".
+Change later via `/plugin config pb-graphiti` or by editing `~/.claude/settings.json` → `pluginConfigs["pb-graphiti@pb-graphiti"].options.graphiti_url`.
 
-**To override the plugin's URL** (e.g. for a host-side smoke test), drop a project-level `.mcp.json` that re-declares `graphiti` with your preferred URL. Project `.mcp.json` takes precedence when names collide; combine with `"enableAllProjectMcpServers": true` in `.claude/settings.local.json` to skip the trust prompt.
+**Gotchas that will silently break the connection:**
+
+1. **Trailing slash.** The server 307-redirects `/mcp/` → `/mcp`; most MCP HTTP clients don't follow 307 on POST. Always use `/mcp` (no slash). Plugin defaults handle this correctly.
+2. **Wrong host for the runtime.** `host.docker.internal` does not resolve on a bare Linux host; `localhost` inside a container points at the container itself, not the docker host. Pick the URL based on where Claude is actually running.
 
 ## Usage — the `group_id` model
 
