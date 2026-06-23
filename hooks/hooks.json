@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "GRAPHITI_URL=\"${user_config.graphiti_url}\" python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/session_start_recall.py\"",
+            "timeout": 15,
+            "statusMessage": "Recalling Graphiti context...",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "agent",
+            "prompt": "The conversation is about to be compacted. Review what's about to be lost ($ARGUMENTS) and capture any worthwhile long-term facts to the shared Graphiti knowledge graph via the `graphiti` MCP.\n\nWrite an episode for ANY of: a decision with rationale, a non-obvious project quirk, an incident root cause, a vendor/module verdict, a client preference, a repeatable runbook step. DO NOT write: ephemeral session state, in-progress task lists, restatements of CLAUDE.md content, anything obtainable from `git log` / `git blame` / current file state.\n\nScope resolution (do not ask the user — this hook is non-interactive):\n- If $DDEV_PROJECT env is set → group_id = $DDEV_PROJECT\n- Else if `git rev-parse --show-toplevel` succeeds → group_id = basename of that path\n- Else → group_id = 'fleet'\n- Override the above to 'fleet' when the fact is methodology, tool-use, or cross-project policy.\n\nFor each fact: call `add_memory` with a clear `name`, an `episode_body` that includes the Why and the How-to-apply, `source_description='claude-code precompact <YYYY-MM-DD>'`, and `reference_time` set to today's ISO timestamp.\n\nReport a single-line summary: 'consolidated N episode(s) to <group_id>' or 'nothing worth saving'.",
+            "timeout": 120,
+            "statusMessage": "Consolidating session to Graphiti..."
+          }
+        ]
+      }
+    ]
+  }
+}

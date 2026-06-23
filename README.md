@@ -22,7 +22,8 @@ Use both. Auto-memory for hard rules that MUST load every session. pb-graphiti f
 .mcp.json              MCP client config — URL prompted at enable time (default http://localhost:8765/mcp)
 skills/graphiti-usage/ SKILL.md — write/query discipline, group_id scope model
 commands/              /pb-graphiti:ingest-folder + /pb-graphiti:ingest-slack
-scripts/               Python helpers used by the ingest commands (stdlib only)
+hooks/                 SessionStart recall + PreCompact consolidation hooks
+scripts/               Python helpers used by the ingest commands and hooks (stdlib only)
 infra/                 docker-compose recipe for the host-side Neo4j + Graphiti stack
 ```
 
@@ -118,6 +119,48 @@ Two tiers:
 From inside a project, ALWAYS query both: `group_ids: ["<project-id>", "fleet"]`. Surfaces fleet rules everywhere without leaking project A's quirks into project B.
 
 Full discipline (when to write, when to read, scope confirmation rule, cypher to move mis-scoped nodes) lives in [`skills/graphiti-usage/SKILL.md`](./skills/graphiti-usage/SKILL.md). The skill auto-surfaces to Claude when the graphiti MCP is reachable.
+
+## Continuous memory — automatic recall and consolidation
+
+Two hooks ship with the plugin and turn on the moment you enable it. They make the read/write loop automatic so you stop re-explaining project context every session.
+
+### SessionStart hook — automatic recall
+
+Every time you start a Claude Code session, the plugin queries Graphiti for the **top 8 nodes** scoped to `[<project-id>, "fleet"]` and injects them as `additionalContext`. Claude sees a digest like:
+
+```
+## Graphiti recall (project=acme-store + fleet)
+
+Top 8 relevant facts from prior sessions:
+- **acme-store LIVE branch** [Project] (`acme-store`) — LIVE-equivalent branch is `uat`, not `main`...
+- **Vendor X blocked** [Vendor] (`fleet`) — Module quality issues; use Vendor Y instead...
+- ...
+```
+
+Project id is resolved deterministically: `$DDEV_PROJECT` → git toplevel basename → `fleet`-only fallback. The hook is `async`, so a slow or unreachable Graphiti never blocks session start — if it fails for any reason, the session proceeds with no injection.
+
+### PreCompact hook — automatic consolidation
+
+When the conversation is about to be compacted, the plugin runs an agentic hook that reviews the soon-to-be-lost context and writes any worthwhile facts to Graphiti — without prompting. Scope is auto-resolved by the same rules as SessionStart, overridden to `fleet` for cross-project content (methodology, tool-use, vendor verdicts that apply anywhere).
+
+Facts the hook writes: decisions with rationale, project quirks, incident root causes, vendor verdicts, client preferences, runbook steps. Facts it skips: ephemeral session state, in-progress task lists, anything obtainable from `git log` / `git blame`, restatements of CLAUDE.md.
+
+The hook's auto-write bypasses the [graphiti-usage skill's Hard Rule 1](skills/graphiti-usage/SKILL.md) (which requires user confirmation before any add_memory call). The rule still applies to add_memory calls Claude makes mid-conversation; it only carves out for the non-interactive PreCompact hook.
+
+### Disabling the hooks
+
+If you want recall but not consolidation, or vice versa, edit `~/.claude/settings.json`:
+
+```json
+{
+  "disableAllHooks": false,
+  "hooks": {
+    "PreCompact": []
+  }
+}
+```
+
+Or disable both entirely with `"disableAllHooks": true` (kills hooks from every plugin, not just this one).
 
 ## Bulk ingestion — folders and Slack history
 

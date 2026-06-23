@@ -23,7 +23,7 @@ Resolve the project id deterministically:
 
 ## Hard rules
 
-1. **Before EVERY `add_memory` call: classify and confirm scope with the user.**
+1. **Before EVERY in-conversation `add_memory` call: classify and confirm scope with the user.**
    Output ONE line in this exact form, then wait for confirmation:
 
    ```
@@ -35,6 +35,8 @@ Resolve the project id deterministically:
    - Any other reply → treat as a correction; re-classify and re-confirm.
 
    Default suggestion: project, unless the fact references multiple projects, names a tool/methodology, or codifies a policy that applies anywhere. When in doubt → ask.
+
+   **Exception:** the `PreCompact` consolidation hook shipped with this plugin runs non-interactively (no user is at the keyboard to confirm). It resolves scope deterministically from `$DDEV_PROJECT` → git toplevel basename → `fleet`, and writes without prompting. Hard Rule 1 applies to add_memory calls Claude makes mid-conversation, NOT to that hook.
 
 2. **Always query BOTH scopes from a project context.** Use `group_ids: ["<project-id>", "fleet"]` on every `search_nodes` / `search_memory_facts` call. Surfaces fleet rules in every project without leaking project A's quirks into project B.
 
