@@ -51,9 +51,10 @@ Or for local development, clone and reference by path in `~/.claude/settings.jso
 }
 ```
 
-## Bootstrap (server side — one-time per host)
+## Graphiti server. 
 
 The plugin's MCP config points at `http://host.docker.internal:8765/mcp/`. That endpoint is YOUR responsibility — run the bundled compose stack on your host (or any reachable host):
+We build own docker form their source as their supplied docker was dated at the making of this.
 
 ```bash
 cd infra/
