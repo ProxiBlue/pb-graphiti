@@ -21,7 +21,7 @@ Use both. Auto-memory for hard rules that MUST load every session. pb-graphiti f
 .claude-plugin/        plugin + marketplace manifest
 .mcp.json              MCP client config — URL prompted at enable time (default http://localhost:8765/mcp)
 skills/graphiti-usage/ SKILL.md — write/query discipline, group_id scope model
-commands/              /pb-graphiti:ingest-folder + /pb-graphiti:ingest-slack
+commands/              /pb-graphiti:ingest-folder + ingest-slack + ingest-magento-modules
 hooks/                 SessionStart recall + PreCompact consolidation hooks
 scripts/               Python helpers used by the ingest commands and hooks (stdlib only)
 infra/                 docker-compose recipe for the host-side Neo4j + Graphiti stack
@@ -173,9 +173,9 @@ If you want recall but not consolidation, or vice versa, edit `~/.claude/setting
 
 Or disable both entirely with `"disableAllHooks": true` (kills hooks from every plugin, not just this one).
 
-## Bulk ingestion — folders and Slack history
+## Bulk ingestion — folders, Slack, Magento modules
 
-Two slash commands import external content as Graphiti episodes. Both go through the same `add_memory` tool an agent would use ad-hoc; the scripts just batch the calls.
+Three slash commands import external content as Graphiti episodes. All go through the same `add_memory` tool an agent would use ad-hoc; the scripts just batch the calls.
 
 ### `/pb-graphiti:ingest-folder <path>`
 
@@ -190,6 +190,23 @@ Use for:
   /pb-graphiti:ingest-folder app/code --include 'README*.md,readme.md,*.md' --group-id <project-id>
   ```
   Future sessions then recall "we have module X in project Y that does Z" without re-reading the codebase.
+
+### `/pb-graphiti:ingest-magento-modules [<project-root>]`
+
+Magento-aware module ingest — the recommended path for capturing project module documentation. Walks `app/code/<Vendor>/<Module>/` (and optionally `vendor/*/*/` with `--include-vendor`) and assembles ONE episode per module containing:
+
+- Canonical `Vendor_Module` name (from `etc/module.xml`)
+- `<sequence>` dependencies
+- composer.json: description, version, require, license
+- README.md / readme.md content (if present)
+- CHANGELOG.md head (last 5 entries, if present)
+- **Terse wiring summary** — di.xml preferences (class overrides), plugin targets, events.xml observers. Headlines only, not full XML — GitNexus handles the structural detail.
+
+Each episode's `source_description` is the module's `file://` URI, so recalled facts cite back to the exact module directory.
+
+**Pairs with GitNexus.** GitNexus = code structure (symbols, callers, dependencies, signatures). pb-graphiti = the *why* — design rationale, business purpose, vendor verdicts captured in READMEs and changelogs. Use both: at task start, GitNexus tells you *what exists*, Graphiti tells you *why it was built that way*.
+
+Modules with nothing but a bare module.xml (no README, composer, or interesting wiring) are skipped automatically — the script reports the skip count in dry-run.
 
 ### `/pb-graphiti:ingest-slack <slack-export.zip>`
 
