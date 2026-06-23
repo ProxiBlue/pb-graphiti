@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """
-Ingest Magento 2 / Mage-OS module documentation into Graphiti.
+Ingest Magento 2 / Mage-OS module *documentation* into Graphiti.
 
 Walks app/code/<Vendor>/<Module>/ (and optionally vendor/*/*/) looking for
-module.xml. For each module found, builds one episode containing:
+module.xml. For each module found, builds one episode containing ONLY the
+human-readable intent of the module — no wiring, no class relations:
   - canonical name (Vendor_Module from module.xml)
-  - sequence dependencies (from <sequence><module name=.../></sequence>)
+  - sequence dependencies (Magento module-level only — these are docs-ish)
   - composer.json description + version (if present)
   - README.md content (if present)
   - CHANGELOG.md head (if present, last ~5 entries)
-  - di.xml preference summary (which classes the module overrides)
-  - events.xml summary (which events it observes)
 
-Pairs with GitNexus: GitNexus indexes code structure, this captures the
-"why" — design rationale, business purpose, vendor verdicts. Recall surfaces
-"we have module X in project Y that does Z" without re-reading the code.
+DELIBERATELY EXCLUDED — let GitNexus handle these:
+  - di.xml preferences / plugin targets (class-level wiring)
+  - events.xml observers (class-level wiring)
+  - any other code-relationship info
+
+Pairs with GitNexus: GitNexus indexes code structure & wiring; this captures
+the "why" — design rationale, business purpose, vendor verdicts that live
+in READMEs and changelogs. Recall surfaces "we have module X in project Y
+that does Z" without re-reading the codebase.
 
 Source description: file:// URI of the module's root directory, so
 recalled facts cite back to the exact module dir.
@@ -111,47 +116,6 @@ def parse_composer_json(path: Path) -> dict:
     }
 
 
-def parse_events_xml(path: Path) -> list[str]:
-    """Return list of observed event names (deduped)."""
-    if not path.is_file():
-        return []
-    try:
-        tree = ET.parse(path)
-    except (ET.ParseError, OSError):
-        return []
-    return sorted({e.get("name") for e in tree.iter("event") if e.get("name")})
-
-
-def parse_di_xml(path: Path) -> dict:
-    """Return high-level di.xml summary: preferences, plugins, virtualTypes."""
-    if not path.is_file():
-        return {}
-    try:
-        tree = ET.parse(path)
-    except (ET.ParseError, OSError):
-        return {}
-    preferences = [
-        f"{p.get('for')} → {p.get('type')}"
-        for p in tree.iter("preference")
-        if p.get("for") and p.get("type")
-    ]
-    plugin_targets = sorted({
-        t.get("name")
-        for t in tree.iter("type")
-        if t.find("plugin") is not None and t.get("name")
-    })
-    virtual_types = sorted({
-        v.get("name")
-        for v in tree.iter("virtualType")
-        if v.get("name")
-    })
-    return {
-        "preferences": preferences,
-        "plugin_targets": plugin_targets,
-        "virtual_types": virtual_types,
-    }
-
-
 def head_of_file(path: Path, max_chars: int = 4000) -> str:
     if not path.is_file():
         return ""
@@ -189,12 +153,6 @@ def build_episode(module_dir: Path, project_root: Path) -> dict | None:
         return None  # Not a valid Magento module
 
     composer = parse_composer_json(module_dir / "composer.json")
-    events = parse_events_xml(module_dir / "etc" / "events.xml")
-    events_frontend = parse_events_xml(module_dir / "etc" / "frontend" / "events.xml")
-    events_adminhtml = parse_events_xml(module_dir / "etc" / "adminhtml" / "events.xml")
-    di = parse_di_xml(module_dir / "etc" / "di.xml")
-    di_frontend = parse_di_xml(module_dir / "etc" / "frontend" / "di.xml")
-
     readme = head_of_file(module_dir / "README.md") or head_of_file(module_dir / "readme.md")
     changelog = changelog_head(module_dir / "CHANGELOG.md") or changelog_head(module_dir / "changelog.md")
 
@@ -219,30 +177,18 @@ def build_episode(module_dir: Path, project_root: Path) -> dict | None:
         deps = ", ".join(f"{k}@{v}" for k, v in composer["require"].items())
         parts.append(f"Composer require: {deps}")
 
-    # Wiring summary — terse, just headlines (GitNexus handles the structure)
-    if di.get("preferences"):
-        parts.append("\n## DI preferences (class overrides)")
-        for p in di["preferences"]:
-            parts.append(f"- {p}")
-    all_plugins = (di.get("plugin_targets") or []) + (di_frontend.get("plugin_targets") or [])
-    if all_plugins:
-        parts.append("\n## Plugin targets (classes intercepted)")
-        for t in sorted(set(all_plugins)):
-            parts.append(f"- {t}")
-    all_events = sorted(set(events + events_frontend + events_adminhtml))
-    if all_events:
-        parts.append("\n## Events observed")
-        for e in all_events:
-            parts.append(f"- {e}")
-
     if readme:
         parts.append("\n## README\n" + readme)
     if changelog:
         parts.append("\n## CHANGELOG (recent)\n" + changelog)
 
     body = "\n".join(parts).strip()
-    if len(body) < 80:
-        return None  # Bare module.xml with nothing else — not worth an episode
+    has_docs = bool(readme or changelog or composer.get("description"))
+    if not has_docs:
+        # No human-readable docs whatsoever — just a registered module with no
+        # description. Skip; ingesting "Module: Vendor_Foo, Path: ..." adds
+        # graph noise without giving Claude any "why" to recall.
+        return None
 
     mtime = datetime.datetime.fromtimestamp(module_xml.stat().st_mtime, tz=datetime.timezone.utc).isoformat()
 

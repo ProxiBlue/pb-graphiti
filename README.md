@@ -203,20 +203,19 @@ Cap: 30k chars per episode (long discussions truncated). `source_description` is
 
 ### `/pb-graphiti:ingest-magento-modules [<project-root>]`
 
-Magento-aware module ingest — the recommended path for capturing project module documentation. Walks `app/code/<Vendor>/<Module>/` (and optionally `vendor/*/*/` with `--include-vendor`) and assembles ONE episode per module containing:
+Magento-aware module-doc ingest — the recommended path for capturing project module documentation. Walks `app/code/<Vendor>/<Module>/` (and optionally `vendor/*/*/` with `--include-vendor`) and assembles ONE episode per module containing:
 
 - Canonical `Vendor_Module` name (from `etc/module.xml`)
-- `<sequence>` dependencies
+- `<sequence>` dependencies (module-level — these read as docs)
 - composer.json: description, version, require, license
 - README.md / readme.md content (if present)
 - CHANGELOG.md head (last 5 entries, if present)
-- **Terse wiring summary** — di.xml preferences (class overrides), plugin targets, events.xml observers. Headlines only, not full XML — GitNexus handles the structural detail.
+
+**Deliberately excluded — GitNexus owns these:** di.xml preferences, plugin targets, events.xml observers. Putting class wiring into Graphiti creates hundreds of Component nodes per project — graph noise that duplicates GitNexus's structural index. Keep the layers clean: GitNexus = code structure (symbols, callers, signatures); pb-graphiti = the *why* (purpose, design rationale, vendor verdicts from READMEs and changelogs).
 
 Each episode's `source_description` is the module's `file://` URI, so recalled facts cite back to the exact module directory.
 
-**Pairs with GitNexus.** GitNexus = code structure (symbols, callers, dependencies, signatures). pb-graphiti = the *why* — design rationale, business purpose, vendor verdicts captured in READMEs and changelogs. Use both: at task start, GitNexus tells you *what exists*, Graphiti tells you *why it was built that way*.
-
-Modules with nothing but a bare module.xml (no README, composer, or interesting wiring) are skipped automatically — the script reports the skip count in dry-run.
+Modules with no README, no composer description, and no CHANGELOG are skipped — a bare module.xml has nothing for Claude to recall. The dry-run reports the skip count.
 
 ### `/pb-graphiti:ingest-slack <slack-export.zip>`
 
