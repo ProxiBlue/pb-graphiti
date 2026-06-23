@@ -27,7 +27,7 @@ scripts/               Python helpers used by the ingest commands and hooks (std
 infra/                 docker-compose recipe for the host-side Neo4j + Graphiti stack
 ```
 
-Installing the plugin gives Claude the MCP client config + the usage skill. **You still need to stand up the server yourself** (see Bootstrap).
+Installing the plugin gives Claude the MCP client config + the usage skill. **You still need to stand up the server yourself** (see Graphiti Server).
 
 ## Install
 
