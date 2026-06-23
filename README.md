@@ -21,6 +21,8 @@ Use both. Auto-memory for hard rules that MUST load every session. pb-graphiti f
 .claude-plugin/        plugin + marketplace manifest
 .mcp.json              MCP client config — URL prompted at enable time (default http://localhost:8765/mcp)
 skills/graphiti-usage/ SKILL.md — write/query discipline, group_id scope model
+commands/              /pb-graphiti:ingest-folder + /pb-graphiti:ingest-slack
+scripts/               Python helpers used by the ingest commands (stdlib only)
 infra/                 docker-compose recipe for the host-side Neo4j + Graphiti stack
 ```
 
@@ -116,6 +118,36 @@ Two tiers:
 From inside a project, ALWAYS query both: `group_ids: ["<project-id>", "fleet"]`. Surfaces fleet rules everywhere without leaking project A's quirks into project B.
 
 Full discipline (when to write, when to read, scope confirmation rule, cypher to move mis-scoped nodes) lives in [`skills/graphiti-usage/SKILL.md`](./skills/graphiti-usage/SKILL.md). The skill auto-surfaces to Claude when the graphiti MCP is reachable.
+
+## Bulk ingestion — folders and Slack history
+
+Two slash commands import external content as Graphiti episodes. Both go through the same `add_memory` tool an agent would use ad-hoc; the scripts just batch the calls.
+
+### `/pb-graphiti:ingest-folder <path>`
+
+Walks a directory and ingests `*.md`, `*.markdown`, `*.txt`, `*.rst` (override with `--include`). Markdown is chunked on `##` headings; plain text on paragraph clusters; default target ~1500 words per chunk. Reference time on each episode is the source file's mtime — Graphiti is bi-temporal, so historical docs get correct valid-at metadata.
+
+Use for: meeting transcripts (export as markdown first), PRDs, ADRs, internal wikis, runbooks.
+
+### `/pb-graphiti:ingest-slack <slack-export.zip>`
+
+Takes the `.zip` Slack produces from *Workspace settings → Import/Export Data → Export*. Writes one episode per channel-per-day, `format=message`. Threads inline under their parent. Channel-join/leave/topic noise filtered. Reference time = midnight UTC on the message day.
+
+Slack chats are where the *why* lives — decisions, vendor verdicts, incident chats. Worth ingesting selectively (`--channels`, `--since`) rather than the whole workspace.
+
+### Common to both
+
+- **Confirm scope first.** Both commands prompt for fleet vs project before any write.
+- **Dry-run first.** Both default to `--dry-run` in the slash command flow; you see the plan (episode count, sample names) before any episode is created.
+- **Dedupe via state file.** `.pb-graphiti-ingest.json` in the cwd records what's been ingested. Re-runs from the same cwd skip already-ingested items. Ctrl-C is safe — state is flushed after every successful write. Pass `--reingest` to force a full re-write.
+- **Cost reality.** Every episode is one Anthropic Haiku call (entity extraction) + one Voyage embed call. A year of one Slack channel chunked per-day ≈ 365 episodes ≈ ~$0.50 in Haiku. A folder of 50 medium markdown docs chunked per heading ≈ 200-400 episodes ≈ ~$0.50-1.00.
+
+The scripts are stdlib-only Python (no `pip install` required). Run them directly if you prefer:
+
+```bash
+python "$(claude plugin path pb-graphiti)/scripts/ingest_folder.py" --help
+python "$(claude plugin path pb-graphiti)/scripts/ingest_slack.py"  --help
+```
 
 ## Costs
 
