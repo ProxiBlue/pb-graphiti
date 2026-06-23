@@ -1,0 +1,28 @@
+pb-graphiti
+Copyright (c) 2026 Lucas van Staden / Proxiblue
+https://github.com/ProxiBlue/pb-graphiti
+
+This product includes software developed by
+Lucas van Staden / Proxiblue (https://www.proxiblue.com.au).
+
+------------------------------------------------------------------------
+
+This plugin orchestrates and depends on third-party software that is
+NOT redistributed in this repository — consumers fetch and run those
+components themselves:
+
+  * Graphiti (graphiti-core + MCP server)
+    Copyright (c) Zep AI, Inc.
+    Licensed under the Apache License, Version 2.0
+    https://github.com/getzep/graphiti
+
+  * Neo4j Community Edition (5.26.0)
+    Copyright (c) Neo4j Inc.
+    Licensed under the GNU General Public License v3
+    https://github.com/neo4j/neo4j
+
+The above components are run as independent processes / orchestrated
+images. No source code from those components is bundled in this
+repository. See README.md "Attributions & licensing" section for full
+detail on dependency licensing and what changes if a fork begins
+bundling Graphiti source directly.

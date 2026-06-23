@@ -1,0 +1,61 @@
+server:
+  transport: "http"
+  host: "0.0.0.0"
+  port: 8000
+
+llm:
+  provider: "anthropic"
+  model: ${MODEL_NAME:claude-haiku-4-5}
+  temperature: 0.0   # MUST set explicitly — schema default is None, which Anthropic rejects with 400.
+  max_tokens: 4096
+
+  providers:
+    anthropic:
+      api_key: ${ANTHROPIC_API_KEY}
+      api_url: ${ANTHROPIC_API_URL:https://api.anthropic.com}
+      max_retries: 3
+
+embedder:
+  provider: "voyage"
+  model: ${EMBEDDER_MODEL:voyage-3-lite}
+  dimensions: 512
+
+  providers:
+    voyage:
+      api_key: ${VOYAGE_API_KEY}
+      api_url: ${VOYAGE_API_URL:https://api.voyageai.com/v1}
+      model: ${EMBEDDER_MODEL:voyage-3-lite}
+
+database:
+  provider: "neo4j"
+
+  providers:
+    neo4j:
+      uri: ${NEO4J_URI:bolt://neo4j:7687}
+      username: ${NEO4J_USER:neo4j}
+      password: ${NEO4J_PASSWORD:changeme}
+      database: ${NEO4J_DATABASE:neo4j}
+      use_parallel_runtime: false
+
+graphiti:
+  group_id: ${GRAPHITI_GROUP_ID:default}
+  user_id: ${USER_ID:claude}
+  entity_types:
+    - name: "Preference"
+      description: "User preferences, choices, opinions, or selections"
+    - name: "Decision"
+      description: "Architectural, branching, or process decisions with rationale (Why + How to apply)"
+    - name: "Incident"
+      description: "Past failures, regressions, root causes; links to commits, files, dates"
+    - name: "Vendor"
+      description: "Third-party suppliers, extensions, services — including blocked vendors and known-bad modules"
+    - name: "Project"
+      description: "Repo / client engagement; LIVE-branch name, deployment quirks"
+    - name: "Client"
+      description: "Customer / store — billing terms, contact preferences, account state"
+    - name: "Procedure"
+      description: "Standard operating procedures, scripted runbooks, sequential instructions"
+    - name: "Component"
+      description: "Module, class, file path, service — with role and ownership"
+    - name: "Topic"
+      description: "Subject area or knowledge domain (use as last resort)"

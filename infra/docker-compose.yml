@@ -1,0 +1,59 @@
+services:
+  neo4j:
+    image: neo4j:5.26.0
+    container_name: graphiti-neo4j
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7474:7474"   # Browser UI — host-only
+      - "127.0.0.1:7687:7687"   # Bolt — host-only
+    environment:
+      - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-changeme}
+      - NEO4J_server_memory_heap_initial__size=512m
+      - NEO4J_server_memory_heap_max__size=1G
+      - NEO4J_server_memory_pagecache_size=512m
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7474"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  graphiti-mcp:
+    # Built from a local checkout of github.com/getzep/graphiti. Clone it as
+    # ./upstream/ (sibling to this file) before `docker compose up`. See README.
+    image: graphiti-fleet/mcp:local
+    build:
+      context: ./upstream/mcp_server
+      dockerfile: docker/Dockerfile.standalone
+      args:
+        GRAPHITI_CORE_VERSION: "0.29.1"
+        MCP_SERVER_VERSION: "1.0.3-local"
+    container_name: graphiti-mcp
+    restart: unless-stopped
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-changeme}
+      - NEO4J_DATABASE=${NEO4J_DATABASE:-neo4j}
+      - GRAPHITI_GROUP_ID=${GRAPHITI_GROUP_ID:-default}
+      - SEMAPHORE_LIMIT=${SEMAPHORE_LIMIT:-5}
+      - CONFIG_PATH=/app/mcp/config/config.yaml
+    volumes:
+      - ./config/config.yaml:/app/mcp/config/config.yaml:ro
+    ports:
+      # Bind to docker bridge so containerised clients (e.g. ddev) can reach via host-gateway.
+      - "8765:8000"
+    command: ["uv", "run", "main.py"]
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
