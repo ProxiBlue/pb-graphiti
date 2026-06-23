@@ -51,7 +51,12 @@ class GraphitiClient:
         self._request_id += 1
         return self._request_id
 
-    def _post(self, body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    def _post(
+        self, body: dict[str, Any], expect_response: bool = True
+    ) -> tuple[dict[str, Any] | None, dict[str, str]]:
+        """POST a JSON-RPC frame. When expect_response is False (notifications),
+        the server returns 202 with an empty body — we accept that and return None.
+        """
         data = json.dumps(body).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
@@ -70,6 +75,9 @@ class GraphitiClient:
             raise GraphitiError(code=e.code, message=f"HTTP {e.code}: {body_text}")
         except urllib.error.URLError as e:
             raise GraphitiError(code=None, message=f"Connection failed: {e.reason}")
+
+        if not expect_response:
+            return None, resp_headers
 
         # The server emits Server-Sent-Events framing even for single responses
         # ("event: message\ndata: {...}\n\n"). Strip framing if present.
@@ -109,15 +117,17 @@ class GraphitiClient:
             }
         )
         self.session_id = headers.get("mcp-session-id")
-        # Required by spec — send notification that we're ready.
+        # Required by spec — send notification that we're ready. Notifications
+        # in JSON-RPC have no `id` and get no response (202 + empty body).
         self._post(
             {
                 "jsonrpc": "2.0",
                 "method": "notifications/initialized",
                 "params": {},
-            }
+            },
+            expect_response=False,
         )
-        return payload.get("result", {})
+        return payload.get("result", {}) if payload else {}
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         payload, _ = self._post(
@@ -128,6 +138,7 @@ class GraphitiClient:
                 "params": {"name": name, "arguments": arguments},
             }
         )
+        assert payload is not None
         result = payload.get("result", {})
         content = result.get("content")
         if isinstance(content, list) and content and content[0].get("type") == "text":

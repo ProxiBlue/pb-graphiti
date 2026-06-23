@@ -36,7 +36,7 @@ Resolve the project id deterministically:
 
    Default suggestion: project, unless the fact references multiple projects, names a tool/methodology, or codifies a policy that applies anywhere. When in doubt → ask.
 
-2. **Always query BOTH scopes from a project context.** Use `group_ids: ["<project-id>", "fleet"]` on every `search_memory_nodes` / `search_memory_facts` call. Surfaces fleet rules in every project without leaking project A's quirks into project B.
+2. **Always query BOTH scopes from a project context.** Use `group_ids: ["<project-id>", "fleet"]` on every `search_nodes` / `search_memory_facts` call. Surfaces fleet rules in every project without leaking project A's quirks into project B.
 
 3. **From the host shell (no project context):** query `group_ids: ["fleet"]` only. Host sessions shouldn't see any project's local quirks unless the user names a project.
 
@@ -84,7 +84,7 @@ Don't write:
 ## When to READ from Graphiti
 
 Read at the start of any task that touches:
-- A project area you haven't touched in this session (`search_memory_nodes` with the area name)
+- A project area you haven't touched in this session (`search_nodes` with the area name)
 - A vendor / module / extension before recommending it
 - A branching / deploy / merge step (check for project-specific rules)
 - A decision that looks like it might already have a precedent
@@ -106,13 +106,13 @@ add_memory(
 
 Searching from inside a project context (always pass BOTH project + fleet):
 ```
-search_memory_nodes(group_ids=["<project-id>", "fleet"], query="<your question>")
+search_nodes(group_ids=["<project-id>", "fleet"], query="<your question>")
 search_memory_facts(group_ids=["<project-id>", "fleet"], query="<relationship you need>")
 ```
 
 Searching from a host shell (no project context):
 ```
-search_memory_nodes(group_ids=["fleet"], query="<your question>")
+search_nodes(group_ids=["fleet"], query="<your question>")
 ```
 
 ## Why this exists

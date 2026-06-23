@@ -1,2 +1,3 @@
 infra/.env
 infra/upstream/
+scripts/__pycache__/
