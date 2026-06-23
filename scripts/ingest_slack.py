@@ -55,48 +55,122 @@ def save_state(state_path: Path, state: dict[str, list[str]]) -> None:
     state_path.write_text(json.dumps(state, indent=2, sort_keys=True))
 
 
-def format_message(msg: dict, user_map: dict[str, str]) -> str | None:
-    """Render one slack message as 'HH:MM @user: text'. Returns None for noise."""
+def slack_permalink(workspace: str | None, channel_id: str | None, ts: str) -> str | None:
+    """Build a Slack archive permalink for a single message. Returns None if missing pieces."""
+    if not workspace or not channel_id or not ts:
+        return None
+    # Slack permalink format: https://<workspace>.slack.com/archives/<channel-id>/p<ts-no-dot>
+    return f"https://{workspace}.slack.com/archives/{channel_id}/p{ts.replace('.', '')}"
+
+
+def format_message(
+    msg: dict,
+    user_map: dict[str, str],
+    *,
+    workspace: str | None = None,
+    channel_id: str | None = None,
+    min_words: int = 0,
+    include_users: set[str] | None = None,
+    exclude_users: set[str] | None = None,
+) -> str | None:
+    """Render one slack message as 'HH:MM @user: text [permalink]'. Returns None for noise or filtered messages.
+
+    Filters applied in order:
+    - subtype-based noise (channel_join/leave/topic/purpose)
+    - empty body
+    - user filters (include_users wins if both set)
+    - min_words (counts whitespace-split tokens in body)
+    """
     if msg.get("subtype") in {"channel_join", "channel_leave", "channel_topic", "channel_purpose"}:
         return None
     text = msg.get("text", "")
     if not text:
         return None
+
+    user_id = msg.get("user") or msg.get("bot_id") or "unknown"
+    user = user_map.get(user_id, user_id)
+    user_keys = {user_id, user}
+    if include_users and not (user_keys & include_users):
+        return None
+    if exclude_users and (user_keys & exclude_users):
+        return None
+
+    if min_words and len(text.split()) < min_words:
+        return None
+
     ts = msg.get("ts", "0")
     try:
         when = datetime.datetime.fromtimestamp(float(ts), tz=datetime.timezone.utc)
         time_str = when.strftime("%H:%M")
     except (ValueError, OSError):
         time_str = "??:??"
-    user_id = msg.get("user") or msg.get("bot_id") or "unknown"
-    user = user_map.get(user_id, user_id)
-    return f"{time_str} @{user}: {text}"
+
+    link = slack_permalink(workspace, channel_id, ts)
+    suffix = f" [{link}]" if link else ""
+    return f"{time_str} @{user}: {text}{suffix}"
 
 
-def render_day(messages: list[dict], user_map: dict[str, str]) -> str:
-    """Render a day's messages with threads inlined under parents."""
-    # Group by thread_ts (None = root post)
+def render_day(
+    messages: list[dict],
+    user_map: dict[str, str],
+    *,
+    workspace: str | None = None,
+    channel_id: str | None = None,
+    min_words: int = 0,
+    include_users: set[str] | None = None,
+    exclude_users: set[str] | None = None,
+) -> tuple[str, int]:
+    """Render a day's messages with threads inlined under parents.
+
+    Returns (rendered_text, surviving_message_count). The count is used by
+    callers to apply per-day thresholds (e.g., --min-day-messages).
+    """
     threads: dict[str | None, list[dict]] = defaultdict(list)
     for m in messages:
         tts = m.get("thread_ts")
-        # Slack sets thread_ts == ts on the parent; treat that as root.
         if tts and tts != m.get("ts"):
             threads[tts].append(m)
         else:
             threads[None].append(m)
 
     lines: list[str] = []
+    surviving = 0
+    fmt_kwargs = dict(
+        workspace=workspace, channel_id=channel_id,
+        min_words=min_words, include_users=include_users, exclude_users=exclude_users,
+    )
     for parent in sorted(threads[None], key=lambda m: float(m.get("ts", "0"))):
-        rendered = format_message(parent, user_map)
+        rendered = format_message(parent, user_map, **fmt_kwargs)
         if not rendered:
             continue
         lines.append(rendered)
+        surviving += 1
         replies = sorted(threads.get(parent.get("ts"), []), key=lambda m: float(m.get("ts", "0")))
         for reply in replies:
-            r = format_message(reply, user_map)
+            r = format_message(reply, user_map, **fmt_kwargs)
             if r:
                 lines.append(f"  └─ {r}")
-    return "\n".join(lines)
+                surviving += 1
+    return "\n".join(lines), surviving
+
+
+def _parse_csv(s: str) -> set[str]:
+    return {x.strip().lstrip("#@") for x in s.split(",") if x.strip()}
+
+
+def passes_keyword_gate(
+    text: str,
+    *,
+    include: set[str] | None = None,
+    exclude: set[str] | None = None,
+) -> bool:
+    """Day-level content gate. Lowercase substring match — cheap and predictable."""
+    lower = text.lower()
+    if include and not any(k.lower() in lower for k in include):
+        return False
+    if exclude and any(k.lower() in lower for k in exclude):
+        return False
+    return True
 
 
 def main() -> int:
@@ -106,6 +180,22 @@ def main() -> int:
     ap.add_argument("--export", required=True, help="Path to slack-export.zip")
     ap.add_argument("--channels", default="", help="Comma-separated channel names to include (default: all)")
     ap.add_argument("--since", default=None, help="ISO date — skip days before this (e.g. 2025-01-01)")
+    ap.add_argument("--workspace-slug", default=None,
+                    help="Slack workspace slug, e.g. 'acmeco' for https://acmeco.slack.com. When set, every rendered message includes its Slack permalink so recalled facts can be cited back to the source thread.")
+    # --- Content filters (drop noise before ingesting) ---
+    ap.add_argument("--min-words", type=int, default=3,
+                    help="Drop messages with fewer than N words (default 3 — filters 'lgtm', 'thanks', emoji-only)")
+    ap.add_argument("--include-users", default="",
+                    help="Comma-separated user ids OR display names — only keep messages from these. Default: all")
+    ap.add_argument("--exclude-users", default="",
+                    help="Comma-separated user ids OR display names — drop messages from these. Default: none")
+    ap.add_argument("--include-keywords", default="",
+                    help="Comma-separated keywords — day must contain at least one (case-insensitive substring). Default: no filter")
+    ap.add_argument("--exclude-keywords", default="",
+                    help="Comma-separated keywords — drop days containing any. Default: no filter")
+    ap.add_argument("--min-day-messages", type=int, default=3,
+                    help="Drop days with fewer than N surviving messages after per-message filters (default 3)")
+    # --- IO / dedupe ---
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--reingest", action="store_true")
     ap.add_argument("--state-file", default=STATE_FILE)
@@ -118,9 +208,16 @@ def main() -> int:
 
     channel_filter = {c.strip().lstrip("#") for c in args.channels.split(",") if c.strip()} or None
     since = datetime.date.fromisoformat(args.since) if args.since else None
+    include_users = _parse_csv(args.include_users) or None
+    exclude_users = _parse_csv(args.exclude_users) or None
+    include_kw = _parse_csv(args.include_keywords) or None
+    exclude_kw = _parse_csv(args.exclude_keywords) or None
     state_path = Path(args.state_file).resolve()
     state = {} if args.reingest else load_state(state_path)
     seen = set(state.get(args.group_id, []))
+
+    dropped_keyword = 0
+    dropped_too_short = 0
 
     with zipfile.ZipFile(export_path, "r") as zf:
         names = zf.namelist()
@@ -130,6 +227,17 @@ def main() -> int:
             users = json.loads(zf.read("users.json"))
             for u in users:
                 user_map[u["id"]] = u.get("profile", {}).get("display_name") or u.get("name") or u["id"]
+
+        # channels.json: build channel-name -> channel-id map for permalinks
+        channel_id_map: dict[str, str] = {}
+        if "channels.json" in names:
+            try:
+                channels = json.loads(zf.read("channels.json"))
+                for c in channels:
+                    if c.get("name") and c.get("id"):
+                        channel_id_map[c["name"]] = c["id"]
+            except (json.JSONDecodeError, KeyError):
+                pass
 
         # Group message files by channel
         per_channel: dict[str, list[str]] = defaultdict(list)
@@ -149,6 +257,7 @@ def main() -> int:
         for channel, files in sorted(per_channel.items()):
             if channel_filter and channel not in channel_filter:
                 continue
+            ch_id = channel_id_map.get(channel)
             for fpath in sorted(files):
                 date_str = Path(fpath).stem
                 day_date = datetime.date.fromisoformat(date_str)
@@ -159,18 +268,46 @@ def main() -> int:
                 if h in seen:
                     continue
                 messages = json.loads(zf.read(fpath))
-                rendered = render_day(messages, user_map)
+                rendered, surviving = render_day(
+                    messages, user_map,
+                    workspace=args.workspace_slug,
+                    channel_id=ch_id,
+                    min_words=args.min_words,
+                    include_users=include_users,
+                    exclude_users=exclude_users,
+                )
                 if not rendered.strip():
                     continue
+                if surviving < args.min_day_messages:
+                    dropped_too_short += 1
+                    continue
+                if not passes_keyword_gate(rendered, include=include_kw, exclude=exclude_kw):
+                    dropped_keyword += 1
+                    continue
+                # Build a source_description that points at the channel for that
+                # date — when --workspace-slug is given this is a clickable
+                # archive URL, otherwise the structured slack: key.
+                if args.workspace_slug and ch_id:
+                    source_desc = f"https://{args.workspace_slug}.slack.com/archives/{ch_id} ({date_str})"
+                else:
+                    source_desc = key
                 plan.append({
                     "hash": h,
                     "key": key,
                     "channel": channel,
                     "date": date_str,
                     "body": rendered,
+                    "source_description": source_desc,
                 })
 
-    print(f"plan: {len(plan)} channel-day episode(s) to write to group_id={args.group_id!r} from {export_path.name}")
+    filter_summary_parts: list[str] = []
+    if dropped_too_short:
+        filter_summary_parts.append(f"{dropped_too_short} day(s) below --min-day-messages")
+    if dropped_keyword:
+        filter_summary_parts.append(f"{dropped_keyword} day(s) failed keyword gate")
+    filter_summary = (" (filtered: " + ", ".join(filter_summary_parts) + ")") if filter_summary_parts else ""
+
+    print(f"plan: {len(plan)} channel-day episode(s) to write to group_id={args.group_id!r} from {export_path.name}{filter_summary}")
     if args.dry_run:
         for ep in plan[:10]:
             line_count = ep["body"].count("\n") + 1
@@ -199,7 +336,7 @@ def main() -> int:
                 name=f"#{ep['channel']} {ep['date']}",
                 episode_body=ep["body"],
                 source="message",
-                source_description=ep["key"],
+                source_description=ep["source_description"],
                 reference_time=f"{ep['date']}T00:00:00+00:00",
             )
             seen.add(ep["hash"])

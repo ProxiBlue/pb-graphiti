@@ -49,6 +49,8 @@ except ImportError as e:
 
 DEFAULT_URL = "http://localhost:8765/mcp"
 TOP_N = 8
+PINNED_GROUP_ID = "initial_ingest"
+PINNED_MAX = 20
 
 
 def resolve_project_id(cwd: Path) -> str | None:
@@ -69,7 +71,27 @@ def resolve_project_id(cwd: Path) -> str | None:
     return None
 
 
-def format_facts(project_id: str | None, nodes: list[dict]) -> str:
+def format_pinned(episodes: list[dict]) -> str:
+    if not episodes:
+        return ""
+    lines: list[str] = []
+    lines.append(f"## Always-loaded (pinned via group_id={PINNED_GROUP_ID!r})")
+    lines.append("")
+    lines.append(f"{len(episodes)} permanent fact(s):")
+    lines.append("")
+    for e in episodes:
+        name = e.get("name", "(unnamed)")
+        content = (e.get("content") or "").strip().replace("\n", " ")
+        if len(content) > 300:
+            content = content[:297] + "..."
+        src = e.get("source_description", "")
+        src_str = f" [src: {src}]" if src else ""
+        lines.append(f"- **{name}** — {content}{src_str}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def format_recall(project_id: str | None, nodes: list[dict]) -> str:
     if not nodes:
         return ""
     lines: list[str] = []
@@ -88,7 +110,7 @@ def format_facts(project_id: str | None, nodes: list[dict]) -> str:
         gid = n.get("group_id", "?")
         lines.append(f"- **{name}**{label_str} (`{gid}`) — {summary}")
     lines.append("")
-    lines.append("_Query Graphiti directly via the `graphiti` MCP for more (`search_nodes`, `search_memory_facts`)._")
+    lines.append("_Query Graphiti directly via the `graphiti` MCP for more (`search_nodes`, `search_memory_facts`, `get_episodes`)._")
     return "\n".join(lines)
 
 
@@ -104,32 +126,53 @@ def main() -> int:
     project_id = resolve_project_id(cwd)
     group_ids = [project_id, "fleet"] if project_id else ["fleet"]
 
+    pinned_episodes: list[dict] = []
+    nodes: list[dict] = []
     try:
         client = GraphitiClient(args.url, timeout=10.0)
         client.initialize()
-        result = client.call_tool(
-            "search_nodes",
-            {
-                "group_ids": group_ids,
-                "query": args.query,
-                "max_nodes": args.top_n,
-            },
-        )
+
+        # Tier 1 — pinned facts (always-loaded). Fetched via get_episodes
+        # because we want the raw written episode bodies, not extracted entities.
+        try:
+            pinned_result = client.call_tool(
+                "get_episodes",
+                {"group_ids": [PINNED_GROUP_ID], "max_episodes": PINNED_MAX},
+            )
+            if isinstance(pinned_result, dict):
+                pinned_episodes = pinned_result.get("episodes", []) or []
+            if not isinstance(pinned_episodes, list):
+                pinned_episodes = []
+        except GraphitiError:
+            pinned_episodes = []  # group may not exist yet; fine
+
+        # Tier 2 — dynamic recall scoped to current project + fleet
+        try:
+            result = client.call_tool(
+                "search_nodes",
+                {"group_ids": group_ids, "query": args.query, "max_nodes": args.top_n},
+            )
+            if isinstance(result, dict):
+                nodes = result.get("nodes", []) or []
+            if not isinstance(nodes, list):
+                nodes = []
+        except GraphitiError:
+            nodes = []
     except GraphitiError:
-        # Server unreachable, auth fail, schema mismatch — never block session.
         print(json.dumps({"suppressOutput": True}))
         return 0
     except Exception:
         print(json.dumps({"suppressOutput": True}))
         return 0
 
-    nodes: list[dict] = []
-    if isinstance(result, dict):
-        nodes = result.get("nodes", []) or []
-    if not isinstance(nodes, list):
-        nodes = []
-
-    additional_context = format_facts(project_id, nodes[: args.top_n])
+    parts: list[str] = []
+    pinned_block = format_pinned(pinned_episodes[:PINNED_MAX])
+    if pinned_block:
+        parts.append(pinned_block)
+    recall_block = format_recall(project_id, nodes[: args.top_n])
+    if recall_block:
+        parts.append(recall_block)
+    additional_context = "\n".join(parts)
     if not additional_context.strip():
         print(json.dumps({"suppressOutput": True}))
         return 0

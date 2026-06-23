@@ -117,6 +117,38 @@ Searching from a host shell (no project context):
 search_nodes(group_ids=["fleet"], query="<your question>")
 ```
 
+## Citation discipline — surface the source
+
+Every episode written via the bundled ingest scripts carries a `source_description` that's a real link or path back to the source content:
+
+| Source | `source_description` format |
+|---|---|
+| Folder ingest (markdown/text/runbook) | `file:///absolute/path/to/file.md` |
+| Slack ingest (with `--workspace-slug`) | `https://<workspace>.slack.com/archives/<channel-id> (<YYYY-MM-DD>)` plus per-message permalinks inline in episode body |
+| Slack ingest (no workspace slug) | `slack:<channel>:<YYYY-MM-DD>` (informational only — not clickable) |
+| PreCompact consolidation | `claude-code-session://<session_id> [precompact <YYYY-MM-DD>]` |
+| Manual `add_memory` | whatever the caller passed |
+
+**When you recall a fact and act on it, surface the source.** Append the `source_description` in brackets after the claim — same discipline as artefact citation in the investigation protocol.
+
+Example (good):
+> The fleet decided to ship the new checkout flow next Tuesday because the A/B test showed 4.2% lift at p<0.01 [src: file:///home/lucas/workspace/.../meeting-transcript.md].
+
+Example (bad — claim with no source):
+> The fleet decided to ship next Tuesday because of the A/B test results.
+
+**To fetch fuller source content for a recalled entity**, use `get_episodes` filtered by the entity's `episodes` field (returned in some search responses), or query by `group_ids` + a content keyword.
+
+## Pinned (always-loaded) facts
+
+The plugin's SessionStart hook also loads any episodes written to `group_id="initial_ingest"` — capped at the most recent 20 — and surfaces them BEFORE the dynamic top-N recall. Use this group for facts you want Claude to see every session regardless of project context:
+
+- Fleet-wide hard rules (caveman style, billing DRAFT-only, etc.)
+- Universal client preferences
+- North-star reminders
+
+To pin a fact, call `add_memory(group_id="initial_ingest", ...)`. To unpin, delete the episode via `delete_episode`. There is no auto-pruning — when the group exceeds 20 episodes, the SessionStart hook silently shows only the 20 most recent, so older pins effectively "fall off". Keep the pinned set curated.
+
 ## Why this exists
 
 Flat-file memory at `~/.claude/projects/.../memory/` scales to ~50 facts before the index becomes unreadable. Domain knowledge across a fleet of projects easily hits 500+. Graphiti handles supersession (X was true until time T, then Y) and cross-fact retrieval (entity-relation queries) natively — neither is possible in flat markdown.

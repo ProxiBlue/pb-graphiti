@@ -109,14 +109,15 @@ Change later via `/plugin config pb-graphiti` or by editing `~/.claude/settings.
 
 ## Usage — the `group_id` model
 
-There is **one** Neo4j database backing all your projects. Namespacing is per-call, via the `group_id` field on every `add_memory` / `search_memory_*` call.
+There is **one** Neo4j database backing all your projects. Namespacing is per-call, via the `group_id` field on every `add_memory` / `search_nodes` call.
 
-Two tiers:
+Three tiers:
 
+- **`group_id="initial_ingest"`** — pinned facts always shown at session start, capped at 20 most recent. Curate manually; no auto-pruning. Use for north-star rules you always want loaded.
 - **`group_id="fleet"`** — cross-project facts (methodology, vendor rules, organisation policy).
 - **`group_id="<project-id>"`** — project-specific quirks. Resolve from `$DDEV_PROJECT` or `basename $(git rev-parse --show-toplevel)`.
 
-From inside a project, ALWAYS query both: `group_ids: ["<project-id>", "fleet"]`. Surfaces fleet rules everywhere without leaking project A's quirks into project B.
+From inside a project, ALWAYS query both project + fleet on dynamic recall: `group_ids: ["<project-id>", "fleet"]`. Surfaces fleet rules everywhere without leaking project A's quirks into project B. `initial_ingest` is loaded automatically by the SessionStart hook in addition to dynamic recall.
 
 Full discipline (when to write, when to read, scope confirmation rule, cypher to move mis-scoped nodes) lives in [`skills/graphiti-usage/SKILL.md`](./skills/graphiti-usage/SKILL.md). The skill auto-surfaces to Claude when the graphiti MCP is reachable.
 
@@ -126,18 +127,28 @@ Two hooks ship with the plugin and turn on the moment you enable it. They make t
 
 ### SessionStart hook — automatic recall
 
-Every time you start a Claude Code session, the plugin queries Graphiti for the **top 8 nodes** scoped to `[<project-id>, "fleet"]` and injects them as `additionalContext`. Claude sees a digest like:
+Every time you start a Claude Code session, the plugin queries Graphiti and injects two tiers of context:
+
+1. **Pinned facts** — all episodes in `group_id="initial_ingest"`, capped at 20 most recent. Use this for fleet-wide rules that should be visible every session regardless of cwd.
+2. **Dynamic recall** — top 8 entity nodes for `[<project-id>, "fleet"]` against a default semantic query.
+
+Project id is resolved deterministically: `$DDEV_PROJECT` → git toplevel basename → `fleet`-only fallback. The hook is `async`, so a slow or unreachable Graphiti never blocks session start — if it fails for any reason, the session proceeds with no injection.
+
+What Claude sees as `additionalContext`:
 
 ```
-## Graphiti recall (project=acme-store + fleet)
+## Always-loaded (pinned via group_id='initial_ingest')
+1 permanent fact(s):
+- **Caveman default response style** — All responses default to caveman style... [src: ~/claude-skills-central/rules/caveman.md]
 
+## Graphiti recall (project=acme-store + fleet)
 Top 8 relevant facts from prior sessions:
 - **acme-store LIVE branch** [Project] (`acme-store`) — LIVE-equivalent branch is `uat`, not `main`...
 - **Vendor X blocked** [Vendor] (`fleet`) — Module quality issues; use Vendor Y instead...
 - ...
 ```
 
-Project id is resolved deterministically: `$DDEV_PROJECT` → git toplevel basename → `fleet`-only fallback. The hook is `async`, so a slow or unreachable Graphiti never blocks session start — if it fails for any reason, the session proceeds with no injection.
+**To pin a fact:** call `add_memory(group_id="initial_ingest", name="...", episode_body="...", source_description="...")` via the graphiti MCP from any session. There's no slash-command wrapper yet — write directly.
 
 ### PreCompact hook — automatic consolidation
 
@@ -168,15 +179,42 @@ Two slash commands import external content as Graphiti episodes. Both go through
 
 ### `/pb-graphiti:ingest-folder <path>`
 
-Walks a directory and ingests `*.md`, `*.markdown`, `*.txt`, `*.rst` (override with `--include`). Markdown is chunked on `##` headings; plain text on paragraph clusters; default target ~1500 words per chunk. Reference time on each episode is the source file's mtime — Graphiti is bi-temporal, so historical docs get correct valid-at metadata.
+Walks a directory and ingests `*.md`, `*.markdown`, `*.txt`, `*.rst` (override with `--include`). Markdown is chunked on `##` headings; plain text on paragraph clusters; default target ~1500 words per chunk. Reference time on each episode is the source file's mtime — Graphiti is bi-temporal, so historical docs get correct valid-at metadata. Source description is the file's `file://` URI so recalled facts can be cited back to the exact document.
 
-Use for: meeting transcripts (export as markdown first), PRDs, ADRs, internal wikis, runbooks.
+Use for:
+- **Meeting transcripts** (export as markdown first)
+- **PRDs / ADRs / specs**
+- **Internal wikis, runbooks, postmortems**
+- **Module documentation** — pair with GitNexus: GitNexus indexes the code structure, Graphiti indexes the *why* (purpose, design notes, integration intent from each module's README.md). Example:
+  ```
+  /pb-graphiti:ingest-folder app/code --include 'README*.md,readme.md,*.md' --group-id <project-id>
+  ```
+  Future sessions then recall "we have module X in project Y that does Z" without re-reading the codebase.
 
 ### `/pb-graphiti:ingest-slack <slack-export.zip>`
 
 Takes the `.zip` Slack produces from *Workspace settings → Import/Export Data → Export*. Writes one episode per channel-per-day, `format=message`. Threads inline under their parent. Channel-join/leave/topic noise filtered. Reference time = midnight UTC on the message day.
 
-Slack chats are where the *why* lives — decisions, vendor verdicts, incident chats. Worth ingesting selectively (`--channels`, `--since`) rather than the whole workspace.
+Slack chats are where the *why* lives — decisions, vendor verdicts, incident chats. Worth ingesting selectively rather than the whole workspace. Filter flags stack:
+
+| Flag | What it drops | Default |
+|---|---|---|
+| `--channels '#x,#y'` | Anything not from listed channels | (all channels in export) |
+| `--since YYYY-MM-DD` | Days before this date | (no time filter) |
+| `--include-keywords '<words>'` | Days that don't mention any of these (substring, case-insensitive) | (no filter) |
+| `--exclude-keywords '<words>'` | Days that mention any of these | (no filter) |
+| `--include-users '<ids or names>'` | Anything not from these users | (all users) |
+| `--exclude-users '<ids or names>'` | Messages from these users (e.g. bots) | (none) |
+| `--min-words N` | Per-message: under N words ('lgtm', 'thanks', emoji-only) | 3 |
+| `--min-day-messages N` | Days with <N surviving messages after per-message filters | 3 |
+
+For client channels that mix project work and chat, `--include-keywords` is the highest-leverage filter — list the project name, key vendors, ticket prefixes, etc., and entire off-topic days vanish from the plan. Dry-run reports a per-filter dropped-day count so you can tune.
+
+**Citations:** when `--workspace-slug <slug>` is set (e.g. `acmeco` for `https://acmeco.slack.com`), every rendered message gets its Slack permalink inline in the episode body, and the episode's `source_description` becomes the channel-archive URL for that date. Recalled facts can then be cited back to the exact thread. Without `--workspace-slug`, source_description falls back to the structured key `slack:<channel>:<YYYY-MM-DD>` — informational only.
+
+### Citation discipline
+
+Every episode written by either ingest command carries a real link in `source_description` (`file://` URI for docs; Slack archive URL for messages). The shipped `graphiti-usage` skill instructs Claude to surface that source whenever it acts on a recalled fact — same discipline as artefact citation in the investigation protocol. See [`skills/graphiti-usage/SKILL.md`](./skills/graphiti-usage/SKILL.md#citation-discipline--surface-the-source) for the recall-side rules.
 
 ### Common to both
 

@@ -120,7 +120,7 @@ def main() -> int:
     ap.add_argument("--path", required=True, help="Folder to ingest")
     ap.add_argument("--include", default=",".join(DEFAULT_INCLUDE), help="Comma-separated glob patterns (default: *.md,*.markdown,*.txt,*.rst)")
     ap.add_argument("--target-words", type=int, default=1500, help="Target words per chunk")
-    ap.add_argument("--source-prefix", default="doc:", help="Prefix added to source_description")
+    ap.add_argument("--source-prefix", default="", help="Optional prefix prepended to source_description (default: file:// URI of absolute path; with prefix becomes <prefix><file://...>)")
     ap.add_argument("--reference-time", default=None, help="ISO timestamp for all episodes (default: file mtime)")
     ap.add_argument("--dry-run", action="store_true", help="Plan only, do not write")
     ap.add_argument("--reingest", action="store_true", help="Ignore dedupe state, re-write everything")
@@ -141,6 +141,8 @@ def main() -> int:
     plan: list[dict] = []
     for f in iter_files(root, patterns):
         rel = str(f.relative_to(root))
+        abs_path = str(f.resolve())
+        file_uri = f"file://{abs_path}"
         text = f.read_text(encoding="utf-8", errors="replace")
         chunks = chunk_markdown(text, args.target_words) if f.suffix.lower() in {".md", ".markdown"} else chunk_paragraphs(text, args.target_words)
         if not chunks:
@@ -150,11 +152,15 @@ def main() -> int:
             h = chunk_hash(rel, idx, body)
             if h in seen:
                 continue
+            # Embed the source URI in the episode body too, so when Graphiti
+            # extracts entities, the source link is preserved as part of the
+            # extracted facts' provenance (the entity summary can reference it).
+            cited_body = f"Source: {file_uri} (chunk {idx})\n\n{body}"
             plan.append({
                 "hash": h,
                 "name": f"{rel}#{idx} — {title}"[:120],
-                "body": body,
-                "source_description": f"{args.source_prefix}{rel}",
+                "body": cited_body,
+                "source_description": f"{args.source_prefix}{file_uri}",
                 "reference_time": args.reference_time or mtime,
             })
 
