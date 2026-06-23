@@ -21,7 +21,7 @@ Use both. Auto-memory for hard rules that MUST load every session. pb-graphiti f
 .claude-plugin/        plugin + marketplace manifest
 .mcp.json              MCP client config — URL prompted at enable time (default http://localhost:8765/mcp)
 skills/graphiti-usage/ SKILL.md — write/query discipline, group_id scope model
-commands/              /pb-graphiti:ingest-folder + ingest-slack + ingest-magento-modules + ingest-tickets
+commands/              /pb-graphiti:ingest-folder + ingest-slack + ingest-magento-modules + ingest-tickets + ingest-email
 hooks/                 SessionStart recall + PreCompact consolidation hooks
 scripts/               Python helpers used by the ingest commands and hooks (stdlib only)
 infra/                 docker-compose recipe for the host-side Neo4j + Graphiti stack
@@ -173,9 +173,9 @@ If you want recall but not consolidation, or vice versa, edit `~/.claude/setting
 
 Or disable both entirely with `"disableAllHooks": true` (kills hooks from every plugin, not just this one).
 
-## Bulk ingestion — folders, Slack, Magento modules, GitHub tickets
+## Bulk ingestion — folders, Slack, Magento modules, GitHub tickets, IMAP email
 
-Four slash commands import external content as Graphiti episodes. All go through the same `add_memory` tool an agent would use ad-hoc; the scripts just batch the calls.
+Five slash commands import external content as Graphiti episodes. All go through the same `add_memory` tool an agent would use ad-hoc; the scripts just batch the calls.
 
 ### `/pb-graphiti:ingest-folder <path>`
 
@@ -190,6 +190,18 @@ Use for:
   /pb-graphiti:ingest-folder app/code --include 'README*.md,readme.md,*.md' --group-id <project-id>
   ```
   Future sessions then recall "we have module X in project Y that does Z" without re-reading the codebase.
+
+### `/pb-graphiti:ingest-email <address> --since YYYY-MM-DD`
+
+IMAP-based email ingest. One episode per email thread (grouped by RFC 2822 References/In-Reply-To, falling back to normalized subject). HTML stripped, quoted replies trimmed, attachments noted in headers only.
+
+Auth: password read from env var (default `$IMAP_PASSWORD`) — never on the CLI. Use an **app password**, not your account password.
+
+Filters: `--address` matches sender OR any recipient; `--since YYYY-MM-DD` is a server-side IMAP filter; `--include-keywords` / `--exclude-keywords` for project relevance; `--min-words` to drop auto-replies (default 10); `--min-thread-messages` to drop one-offs.
+
+`source_description` is `mid:<Message-ID>` of the thread root — RFC 2392 URI that opens in mail clients respecting the scheme. Code-entity suppression is on by default (same rationale as tickets).
+
+Best for: client mailboxes with project-specific subject prefixes, vendor correspondence threads, contract negotiation history.
 
 ### `/pb-graphiti:ingest-tickets <since-year>`
 
