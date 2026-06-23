@@ -77,6 +77,7 @@ Cap: 30,000 chars per episode (long discussions truncated with a marker). For th
 
 ## Notes
 
+- **Code-entity suppression is ON by default.** Tickets reference files and class names heavily; without suppression Graphiti's extractor produces dozens of Component nodes per project that duplicate what GitNexus already indexes. The script tells the extractor to skip code refs and pass them on as Component-typed entities. Override with `--include-code-entities` if you specifically want file/class refs in the domain graph (rare).
 - Auth comes from the `gh` CLI (uses `$GH_TOKEN` or `gh auth login` creds). No separate token needed.
 - The `since` argument accepts a YEAR (`2024`) or full ISO date (`2024-06-15`). Year-only means Jan 1 of that year.
 - Both issues AND PRs are ingested via `/repos/X/issues` — that endpoint returns both. PR-vs-issue is distinguished in the episode name.

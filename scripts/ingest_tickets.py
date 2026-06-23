@@ -177,6 +177,8 @@ def main() -> int:
                     help="Drop tickets with fewer than N (non-bot) comments — useful for skipping trivial bug reports")
     ap.add_argument("--include-bots", action="store_true",
                     help="Include comments from bot accounts (dependabot etc.). Default OFF.")
+    ap.add_argument("--include-code-entities", action="store_true",
+                    help="Allow Graphiti to extract file paths / class names as Component entities. Default OFF — code refs belong in GitNexus, not here.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--reingest", action="store_true")
     ap.add_argument("--state-file", default=STATE_FILE)
@@ -290,6 +292,23 @@ def main() -> int:
         print(f"ERROR initializing MCP session: {e}", file=sys.stderr)
         return 1
 
+    # By default, suppress extraction of code references — tickets are full of
+    # file paths and class names but those belong in GitNexus, not Graphiti.
+    extract_kwargs: dict = {}
+    if not args.include_code_entities:
+        extract_kwargs["excluded_entity_types"] = ["Component"]
+        extract_kwargs["custom_extraction_instructions"] = (
+            "Extract proper-noun concepts: people / authors / contributors, "
+            "vendor names, third-party services, business features, decisions "
+            "with rationale, root causes of incidents, client/customer references. "
+            "DO NOT extract as entities: PHP class names (anything resembling "
+            "Magento\\Foo\\Bar or Vendor\\Module\\Class), file paths "
+            "(*.php, *.xml, *.js, paths with slashes), function/method names, "
+            "issue numbers as bare identifiers, or Magento core module names "
+            "like 'Magento_Catalog'. Those code-structural references belong "
+            "to the code-graph index (GitNexus), not the domain knowledge graph."
+        )
+
     written = 0
     failed = 0
     for ep in plan:
@@ -301,6 +320,7 @@ def main() -> int:
                 source="text",
                 source_description=ep["source_description"],
                 reference_time=ep["reference_time"],
+                **extract_kwargs,
             )
             seen.add(ep["hash"])
             written += 1
