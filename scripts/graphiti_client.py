@@ -159,6 +159,8 @@ class GraphitiClient:
         source_description: str = "",
         reference_time: str | None = None,
         previous_episode_uuids: Iterable[str] | None = None,
+        excluded_entity_types: Iterable[str] | None = None,
+        custom_extraction_instructions: str | None = None,
     ) -> Any:
         args: dict[str, Any] = {
             "group_id": group_id,
@@ -171,4 +173,8 @@ class GraphitiClient:
             args["reference_time"] = reference_time
         if previous_episode_uuids:
             args["previous_episode_uuids"] = list(previous_episode_uuids)
+        if excluded_entity_types:
+            args["excluded_entity_types"] = list(excluded_entity_types)
+        if custom_extraction_instructions:
+            args["custom_extraction_instructions"] = custom_extraction_instructions
         return self.call_tool("add_memory", args)

@@ -272,6 +272,22 @@ def main() -> int:
 
     written = 0
     failed = 0
+    # Steer Graphiti's entity extraction away from code references. We want
+    # only the human-readable concepts (vendor names, business features),
+    # not class names / file paths / Magento core refs — GitNexus indexes
+    # all of that structurally.
+    NO_CODE_INSTRUCTIONS = (
+        "Extract ONLY proper-noun concepts: vendor / 3rd-party module names "
+        "(e.g. 'Hyva', 'Elasticsuite', 'Mageplaza'), business features the "
+        "module provides (e.g. 'category search', 'PDF templates', 'call for "
+        "price'), and client/customer references. "
+        "DO NOT extract as entities: PHP class names (anything resembling "
+        "Magento\\Foo\\Bar or Vendor\\Module\\Class), file paths "
+        "(registration.php, module.xml, etc/*.xml, *.php), method/function "
+        "names, observer/plugin class references, or generic Magento core "
+        "module names like 'Magento_Catalog' / 'Magento_Sales'. Those "
+        "structural references belong to the code-graph index, not here."
+    )
     for ep in plan:
         try:
             client.add_memory(
@@ -281,6 +297,8 @@ def main() -> int:
                 source="text",
                 source_description=ep["source_description"],
                 reference_time=ep["reference_time"],
+                excluded_entity_types=["Component"],
+                custom_extraction_instructions=NO_CODE_INSTRUCTIONS,
             )
             seen.add(ep["hash"])
             written += 1
