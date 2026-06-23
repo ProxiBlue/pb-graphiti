@@ -21,7 +21,7 @@ Use both. Auto-memory for hard rules that MUST load every session. pb-graphiti f
 .claude-plugin/        plugin + marketplace manifest
 .mcp.json              MCP client config — URL prompted at enable time (default http://localhost:8765/mcp)
 skills/graphiti-usage/ SKILL.md — write/query discipline, group_id scope model
-commands/              /pb-graphiti:ingest-folder + ingest-slack + ingest-magento-modules
+commands/              /pb-graphiti:ingest-folder + ingest-slack + ingest-magento-modules + ingest-tickets
 hooks/                 SessionStart recall + PreCompact consolidation hooks
 scripts/               Python helpers used by the ingest commands and hooks (stdlib only)
 infra/                 docker-compose recipe for the host-side Neo4j + Graphiti stack
@@ -173,9 +173,9 @@ If you want recall but not consolidation, or vice versa, edit `~/.claude/setting
 
 Or disable both entirely with `"disableAllHooks": true` (kills hooks from every plugin, not just this one).
 
-## Bulk ingestion — folders, Slack, Magento modules
+## Bulk ingestion — folders, Slack, Magento modules, GitHub tickets
 
-Three slash commands import external content as Graphiti episodes. All go through the same `add_memory` tool an agent would use ad-hoc; the scripts just batch the calls.
+Four slash commands import external content as Graphiti episodes. All go through the same `add_memory` tool an agent would use ad-hoc; the scripts just batch the calls.
 
 ### `/pb-graphiti:ingest-folder <path>`
 
@@ -190,6 +190,16 @@ Use for:
   /pb-graphiti:ingest-folder app/code --include 'README*.md,readme.md,*.md' --group-id <project-id>
   ```
   Future sessions then recall "we have module X in project Y that does Z" without re-reading the codebase.
+
+### `/pb-graphiti:ingest-tickets <since-year>`
+
+GitHub issues and pull requests with their comment threads. Driven by the `gh` CLI (auth via `$GH_TOKEN` or `gh auth login`). One episode per ticket containing title, state, labels, author, body, and chronological comment thread. Bot comments (dependabot, github-actions, codecov) filtered out by default.
+
+The `since` argument accepts a year (`2024`) or full ISO date (`2024-06-15`). Repo defaults to the current git origin; override with `--repo owner/name`. Default labels excluded: `dependencies,duplicate,invalid,wontfix` — override with `--exclude-labels`.
+
+Cap: 30k chars per episode (long discussions truncated). `source_description` is the ticket's `html_url`, so every recalled fact cites back to the exact thread.
+
+**Why this is the highest-value ingest source.** Tickets are where decisions happen: vendor verdicts, design rationale, SEO strategies, bug postmortems. After ingesting, `search_nodes(group_ids=[<project>, "fleet"], query="why X")` typically surfaces the original discussion. Pairs naturally with `ingest-magento-modules`: modules show what was built, tickets show why.
 
 ### `/pb-graphiti:ingest-magento-modules [<project-root>]`
 
