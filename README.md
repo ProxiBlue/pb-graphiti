@@ -648,7 +648,62 @@ RETURN ep.group_id, ep.name, ep.source_description, ep.created_at
 ORDER BY ep.created_at DESC LIMIT 50;
 ```
 
-To wipe everything Claude has self-added (auditing the system's auto-writes, then resetting):
+#### Breakdown by hook type (counts at a glance)
+
+```cypher
+MATCH (ep:Episodic)
+WHERE ep.source_description STARTS WITH 'claude-code-session://'
+   OR ep.source_description STARTS WITH 'claude-code-conversation://'
+WITH ep.group_id AS gid,
+     CASE
+       WHEN ep.source_description CONTAINS '[task-completed' THEN 'task-completed-hook'
+       WHEN ep.source_description CONTAINS '[precompact'     THEN 'precompact-hook'
+       WHEN ep.source_description STARTS WITH 'claude-code-conversation://' THEN 'ad-hoc add_memory'
+       ELSE 'other-claude-write'
+     END AS hook
+RETURN gid, hook, count(*) AS episodes
+ORDER BY gid, episodes DESC;
+```
+
+#### Visual: render the auto-ingested subgraph in the Browser
+
+These return the actual node objects so the Neo4j Browser draws them as a graph (with MENTIONS edges to the extracted entities). Paste into the Browser, hit run, drag nodes to explore.
+
+**Latest 20 auto-ingested episodes with the entities they produced:**
+
+```cypher
+MATCH (ep:Episodic)
+WHERE ep.source_description STARTS WITH 'claude-code-session://'
+   OR ep.source_description STARTS WITH 'claude-code-conversation://'
+WITH ep ORDER BY ep.created_at DESC LIMIT 20
+OPTIONAL MATCH (ep)-[r:MENTIONS]->(e:Entity)
+RETURN ep, r, e;
+```
+
+**Scoped to one project (substitute your group_id):**
+
+```cypher
+MATCH (ep:Episodic)
+WHERE ep.group_id = 'pvcpipesupplies'
+  AND (ep.source_description STARTS WITH 'claude-code-session://'
+       OR ep.source_description STARTS WITH 'claude-code-conversation://')
+OPTIONAL MATCH (ep)-[r:MENTIONS]->(e:Entity)
+RETURN ep, r, e;
+```
+
+**Only TaskCompleted writes (the new v0.12.0 hook):**
+
+```cypher
+MATCH (ep:Episodic)
+WHERE ep.source_description CONTAINS '[task-completed'
+OPTIONAL MATCH (ep)-[r:MENTIONS]->(e:Entity)
+RETURN ep, r, e
+LIMIT 50;
+```
+
+Drag the Episodic nodes (they're a distinct label from Entity) to one side and the Entity nodes to the other — the resulting bipartite layout shows what each task completion contributed to the project brain.
+
+#### Wipe everything Claude has self-added (after auditing, if you want to reset)
 
 ```bash
 # Via the slash command (interactive, recommended):
