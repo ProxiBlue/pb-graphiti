@@ -17,21 +17,29 @@ If the user hasn't set the env var, prompt them to do so first (don't echo the p
 read -s -p "IMAP password: " IMAP_PASSWORD && export IMAP_PASSWORD
 ```
 
-## Step 2 — resolve scope
+## Step 2 — resolve scope + relevance gate
 
-`$ARGUMENTS` should be the address to filter on (client@example.com etc.). Group_id MUST be the project id, not 'fleet':
+`$ARGUMENTS` is the **comma-separated address allowlist** for the project. Each entry is either a full email address (`alice@client.com`) or a domain match (`@client.com` matches anyone at the client's domain). Domain matches are usually the right starting point — they cover the client team without you having to enumerate every individual.
+
+Group_id MUST be the project id, not 'fleet':
 - `$DDEV_PROJECT` env var, else
 - `basename $(git rev-parse --show-toplevel)`
 
 Confirm:
 ```
-Ingest emails from/to <address> in <folder> since <date> — group_id=<id>. Proceed? y/n
+Ingest emails matching <addresses> in <folder> since <date> — group_id=<id>. Proceed? y/n
 ```
 
 Ask the user:
 - What date to start from (`--since YYYY-MM-DD`, required)
 - Which folder (default `INBOX`; for Gmail-wide search use `[Gmail]/All Mail`)
-- Any project keywords to gate on (`--include-keywords`) — strongly recommended for client mailboxes to drop unrelated correspondence
+- Any project keywords for an ADDITIONAL content gate (`--include-keywords`) — useful when the address allowlist alone isn't tight enough (e.g., the client's emails also include unrelated chitchat and you want to keep only project-related threads)
+
+### Relevance is required
+
+**Always pass `--require-relevance`** unless the user explicitly opts out. It blocks the run if NEITHER an address allowlist NOR keywords is set, which prevents accidentally ingesting a whole mailbox.
+
+Address matching covers every participant: `From`, `To`, `Cc`, `Bcc`, `Reply-To`. A thread where the client is `Cc`'d alongside an internal-only `To` still matches — that's the right behavior for capturing "discussions that touched the client."
 
 ## Step 3 — dry-run
 
@@ -41,16 +49,23 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/ingest_email.py" \
   --group-id "<resolved>" \
   --imap-host "<from-step-1>" \
   --imap-user "<from-step-1>" \
-  --address "$ARGUMENTS" \
+  --addresses "$ARGUMENTS" \
+  --require-relevance \
   --since "<YYYY-MM-DD>" \
   --folder "<INBOX or specific>" \
   --include-keywords "<comma-separated>" \
   --dry-run
 ```
 
-Show: thread count, group_id, first ~15 entries with sizes. Heads-up the cost — each thread = one Anthropic Haiku call. 100 threads ≈ $0.50-1.50.
+Show: thread count, group_id, first ~15 entries with sizes. The script reports how many messages were dropped by the address gate vs. the keyword gate vs. the min-words/min-thread filters — relay that summary so the user can see whether the filters are too loose or too tight. Heads-up the cost — each thread = one Anthropic Haiku call. 100 threads ≈ $0.50-1.50.
 
-If the count is huge, tighten with `--include-keywords` (most leverage), `--min-thread-messages 2` (skip one-off notifications), or narrow the date range.
+If the count is huge:
+- Tighten `--addresses` — narrow domain matches to specific people
+- Add or tighten `--include-keywords` (substring match against the whole rendered thread)
+- `--min-thread-messages 2` skips one-off notifications
+- Narrow the date range
+
+If the count is suspiciously low: the address allowlist may be too tight, or the user's folder selection is wrong (Gmail puts archived mail under `[Gmail]/All Mail`, not `INBOX`).
 
 Wait for confirmation: "proceed? y/n".
 
@@ -64,7 +79,8 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/ingest_email.py" \
   --group-id "<resolved>" \
   --imap-host "<host>" \
   --imap-user "<user>" \
-  --address "$ARGUMENTS" \
+  --addresses "$ARGUMENTS" \
+  --require-relevance \
   --since "<YYYY-MM-DD>" \
   --folder "<folder>" \
   --include-keywords "<keywords>"

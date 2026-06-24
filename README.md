@@ -197,9 +197,24 @@ IMAP-based email ingest. One episode per email thread (grouped by RFC 2822 Refer
 
 Auth: password read from env var (default `$IMAP_PASSWORD`) — never on the CLI. Use an **app password**, not your account password.
 
-Filters: `--address` matches sender OR any recipient; `--since YYYY-MM-DD` is a server-side IMAP filter; `--include-keywords` / `--exclude-keywords` for project relevance; `--min-words` to drop auto-replies (default 10); `--min-thread-messages` to drop one-offs.
+#### Project-relevance filtering
 
-`source_description` is `mid:<Message-ID>` of the thread root — RFC 2392 URI that opens in mail clients respecting the scheme. Code-entity suppression is on by default (same rationale as tickets).
+Two layers, stack them:
+
+1. **Address allowlist** — `--addresses '@client.com,external-consultant@vendor.com'`. Matches against EVERY participant (`From`, `To`, `Cc`, `Bcc`, `Reply-To`) — including Cc'd parties, so threads where the client is Cc'd alongside an internal recipient still match. Each entry is either a full address or a domain match (`@client.com` covers anyone at that domain). Run client-side after IMAP fetch so coverage is reliable across providers.
+2. **Keyword gate** — `--include-keywords 'projectname,ticket-prefix'`. Applied to the rendered thread body (after HTML strip + quote trim). Useful when the address list alone lets in too much chatter — e.g., a client domain that also handles unrelated business.
+
+Both filters AND together (a thread must pass both gates if both are set). Combine an address allowlist with a tight keyword list when correspondence is mixed.
+
+#### Safety: `--require-relevance`
+
+Pass `--require-relevance` to **refuse to run** unless an address allowlist or keyword list is set. Prevents the foot-gun of accidentally ingesting an entire mailbox with no scope. Strongly recommended for first-time runs against a new mailbox.
+
+#### Other filters
+
+`--since YYYY-MM-DD` is a server-side IMAP filter; `--min-words` to drop auto-replies (default 10); `--min-thread-messages` to drop one-offs. Code-entity suppression on by default (same rationale as tickets).
+
+`source_description` is `mid:<Message-ID>` of the thread root — RFC 2392 URI that opens in mail clients respecting the scheme.
 
 Best for: client mailboxes with project-specific subject prefixes, vendor correspondence threads, contract negotiation history.
 

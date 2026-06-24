@@ -8,8 +8,12 @@ subject (Re:/Fwd: stripped). Each episode renders all messages in
 chronological order with from, date, body (HTML stripped to plain text).
 
 Filters:
-- --address — only keep messages where the sender OR any recipient matches
-  (handles both sides of a conversation with a single address)
+- --addresses — comma-separated allowlist matched against EVERY participant
+  (From/To/Cc/Bcc/Reply-To). Each entry is either a full address
+  (alice@client.com) or a domain match (@client.com matches anyone at that
+  domain). Run client-side after the IMAP fetch — covers Cc/Bcc reliably.
+- --require-relevance — refuse to run unless --addresses OR --include-keywords
+  is set. Safety against accidentally ingesting an entire mailbox.
 - --since YYYY-MM-DD — IMAP server-side SINCE filter
 - --folder — default INBOX; can be 'all' for Gmail's All Mail (use '[Gmail]/All Mail')
 - --include-keywords / --exclude-keywords — drop threads that don't mention
@@ -31,7 +35,8 @@ Usage:
         --group-id <project-id> \\
         --imap-host imap.gmail.com \\
         --imap-user me@example.com \\
-        --address client@example.com \\
+        --addresses '@client.com,external-consultant@vendor.com' \\
+        --require-relevance \\
         --since 2024-01-01 \\
         --include-keywords 'projectname,ticket-prefix' \\
         [--folder INBOX] [--dry-run] [--reingest]
@@ -202,6 +207,46 @@ def address_matches(haystack: str, needle: str) -> bool:
     return needle.lower() in haystack.lower()
 
 
+def message_participants(msg: email.message.Message) -> set[str]:
+    """Extract every email address mentioned in From/To/Cc/Bcc/Reply-To.
+
+    Returns lowercased addresses (no display names).
+    """
+    out: set[str] = set()
+    for field in ("From", "To", "Cc", "Bcc", "Reply-To", "Sender"):
+        raw = msg.get(field)
+        if not raw:
+            continue
+        try:
+            for _name, addr in email.utils.getaddresses([raw]):
+                if addr:
+                    out.add(addr.lower())
+        except (TypeError, ValueError, IndexError):
+            continue
+    return out
+
+
+def passes_address_gate(participants: set[str], allowed: set[str] | None) -> bool:
+    """Match a message against an allowed-address list.
+
+    Each allowed entry is either:
+    - a full address ('alice@example.com') — matched exactly (case-insensitive)
+    - a domain match ('@example.com') — matched as suffix on the participant
+    """
+    if not allowed:
+        return True
+    for participant in participants:
+        for entry in allowed:
+            if entry.startswith("@"):
+                # Domain match: participant ends with the entry
+                if participant.endswith(entry):
+                    return True
+            else:
+                if participant == entry:
+                    return True
+    return False
+
+
 def passes_keyword_gate(text: str, include: set[str] | None, exclude: set[str] | None) -> bool:
     lower = text.lower()
     if include and not any(k.lower() in lower for k in include):
@@ -252,8 +297,12 @@ def main() -> int:
                     help="Env var holding the IMAP password (default IMAP_PASSWORD). Use an app password.")
     ap.add_argument("--folder", default="INBOX",
                     help='IMAP folder; use "[Gmail]/All Mail" for Gmail-wide search')
-    ap.add_argument("--address", default="",
-                    help="Filter to messages where sender OR any recipient matches this address (substring). Default: no address filter")
+    ap.add_argument("--addresses", "--address", dest="addresses", default="",
+                    help="Comma-separated address allowlist. Matched against EVERY participant (From/To/Cc/Bcc/Reply-To). "
+                         "Each entry is either a full address ('alice@x.com') or a domain match ('@x.com' matches any address at that domain). "
+                         "Default: no address filter. Strongly recommended for client mailboxes — see --require-relevance.")
+    ap.add_argument("--require-relevance", action="store_true",
+                    help="Refuse to run unless --addresses OR --include-keywords is non-empty. Safety against accidentally ingesting an entire mailbox.")
     ap.add_argument("--since", required=True, help="YYYY-MM-DD — server-side SINCE filter")
     # Content filters
     ap.add_argument("--include-keywords", default="",
@@ -285,6 +334,12 @@ def main() -> int:
 
     include_kw = {k.strip() for k in args.include_keywords.split(",") if k.strip()} or None
     exclude_kw = {k.strip() for k in args.exclude_keywords.split(",") if k.strip()} or None
+    allowed_addrs = {a.strip().lower() for a in args.addresses.split(",") if a.strip()} or None
+
+    if args.require_relevance and not allowed_addrs and not include_kw:
+        print("ERROR: --require-relevance is set but neither --addresses nor --include-keywords given. "
+              "Refusing to ingest without a relevance gate.", file=sys.stderr)
+        return 2
 
     state_path = Path(args.state_file).resolve()
     state = {} if args.reingest else load_state(state_path)
@@ -305,12 +360,13 @@ def main() -> int:
             print(f"ERROR: cannot select folder {args.folder!r}", file=sys.stderr)
             return 1
 
-        # Build server-side search: SINCE date + (FROM OR TO address)
+        # Server-side coarse cut: SINCE date.
+        # Address-list matching happens client-side because IMAP OR-chains for
+        # many addresses across multiple header fields get unreadable fast and
+        # don't cover Cc/Bcc on all server implementations. The SINCE filter
+        # alone usually narrows the candidate set enough.
         imap_since = since_date.strftime("%d-%b-%Y")
         search_terms: list[str] = ["SINCE", imap_since]
-        if args.address:
-            # IMAP search syntax: OR FROM "x" TO "x" — OR is prefix-binary
-            search_terms = ["OR", "FROM", args.address, "TO", args.address, "SINCE", imap_since]
 
         print(f"searching with: {' '.join(search_terms)}", file=sys.stderr)
         uids = fetch_uids(M, search_terms)
@@ -319,10 +375,18 @@ def main() -> int:
         # Fetch and group by thread
         threads: dict[str, list[tuple[str, email.message.Message]]] = defaultdict(list)
         thread_root_id: dict[str, str] = {}  # thread_key -> first Message-ID seen
+        dropped_address = 0
         for uid in uids:
             msg = fetch_message(M, uid)
             if msg is None:
                 continue
+            # Client-side address gate — runs BEFORE thread grouping so unrelated
+            # messages don't pull whole threads in via shared subject normalization.
+            if allowed_addrs is not None:
+                participants = message_participants(msg)
+                if not passes_address_gate(participants, allowed_addrs):
+                    dropped_address += 1
+                    continue
             refs = (msg.get("References") or "").split()
             in_reply_to = (msg.get("In-Reply-To") or "").strip()
             msg_id = (msg.get("Message-ID") or "").strip()
@@ -343,7 +407,9 @@ def main() -> int:
             pass
         M.logout()
 
-    print(f"  grouped into {len(threads)} thread(s)", file=sys.stderr)
+    print(f"  grouped into {len(threads)} thread(s)" +
+          (f"  ({dropped_address} message(s) dropped by --addresses gate)" if dropped_address else ""),
+          file=sys.stderr)
 
     plan: list[dict] = []
     dropped_keyword = 0
