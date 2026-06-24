@@ -21,7 +21,7 @@ Use both. Auto-memory for hard rules that MUST load every session. pb-graphiti f
 .claude-plugin/        plugin + marketplace manifest
 .mcp.json              MCP client config — URL prompted at enable time (default http://localhost:8765/mcp)
 skills/graphiti-usage/ SKILL.md — write/query discipline, group_id scope model
-commands/              /pb-graphiti:ingest-{folder,slack,magento-modules,tickets,email} + /pb-graphiti:wipe-channel
+commands/              /pb-graphiti:ingest-{folder,slack,magento-modules,tickets,email} + wipe-channel + automate
 hooks/                 SessionStart recall + PreCompact consolidation hooks
 scripts/               Python helpers used by the ingest commands and hooks (stdlib only)
 infra/                 docker-compose recipe for the host-side Neo4j + Graphiti stack
@@ -317,6 +317,65 @@ Indicative for a solo developer writing ~5 episodes/day across ~10 projects:
 | Voyage embeddings | Free tier (200M tokens/month) | $0 |
 
 Heavy fleet writers (50+ episodes/day, 50+ projects) will see Haiku creep toward ~$10/month. Embedder usage stays well inside Voyage free tier.
+
+## Automation — keep the graph fresh via cron
+
+Manual `/pb-graphiti:ingest-*` runs work fine but you have to remember to run them. For tickets and email — where new content lands continuously — a cron-driven schedule keeps recall current without thinking about it.
+
+Run `/pb-graphiti:automate` for an interactive setup. It detects whether you're on a host or inside a DDEV container and picks the right install path. Or set it up by hand using the wrappers below.
+
+### Cron wrappers (host or container — same scripts)
+
+`scripts/cron/` ships per-source wrappers that:
+
+- Source credentials from `$HOME/.pb-graphiti/env` (template at `scripts/cron/env.example`)
+- Resolve the group_id automatically: `$PB_GRAPHITI_GROUP_ID` → `$DDEV_PROJECT` → `basename $(git rev-parse --show-toplevel)` → error if none
+- Compute `--since` from `LOOKBACK_DAYS` (cross-platform date math — works on Linux GNU date and macOS BSD date)
+- Write dedupe state to a stable location (`$HOME/.pb-graphiti/state/<source>.json`) so cron-from-arbitrary-cwd doesn't lose state
+- Log to `$HOME/.pb-graphiti/logs/<source>.log` with timestamps
+
+Recommended schedule:
+
+```cron
+# Every 6 hours — tickets land continuously, want them in recall by next session
+0 */6 * * * /path/to/pb-graphiti/scripts/cron/ingest-tickets.sh
+
+# Daily at 02:00 — email volume is steady, daily is enough; off-hours so it doesn't compete with day work
+0 2 * * *   /path/to/pb-graphiti/scripts/cron/ingest-email.sh
+```
+
+### Inside a DDEV container
+
+DDEV's web container crontab doesn't survive `ddev restart` unless persisted via `.ddev/web-build/`. Drop a file at `.ddev/web-build/pb-graphiti-cron` containing the schedule and add a `COPY ... /etc/cron.d/` + `RUN chmod 644` to your `.ddev/web-build/Dockerfile`. The `/pb-graphiti:automate` command walks you through this. Once installed, the cron stays put across `ddev rebuild`.
+
+In-container vs host:
+- **In-container** gets `$DDEV_PROJECT` auto-set, MCP reaches via `host.docker.internal`, scripts are mounted at `/var/www/html/.claude/plugins-seed/marketplaces/pb-graphiti/`. Self-contained per project. Stops when DDEV stops — usually fine.
+- **Host** runs regardless of any DDEV state. Right choice for a central mailbox you want polled even when no project is up.
+
+### Source-specific cadence guidance
+
+| Source | Recommended cadence | Reason |
+|---|---|---|
+| `ingest-tickets` | every 6 hours | New issues / PRs land continuously, want them by next session |
+| `ingest-email` | daily 02:00 | Steady volume; off-hours so IMAP load doesn't compete with day work |
+| `ingest-magento-modules` | manual, after `composer update` or new module ships | Modules change rarely |
+| `ingest-folder` | manual | Doc folders update on git push; rerun when something major lands |
+| `ingest-slack` | manual (no live API ingest yet) | Current implementation needs a workspace export `.zip`; live API integration is future work |
+
+### Logs and state
+
+```
+$HOME/.pb-graphiti/
+├── env                 # credentials (chmod 600, never commit)
+├── state/
+│   ├── tickets.json    # dedupe hashes from the tickets ingest
+│   └── email.json      # dedupe hashes from the email ingest
+└── logs/
+    ├── ingest-tickets.log
+    └── ingest-email.log
+```
+
+The state files are the dedupe layer — they record which episodes have been successfully written. A cron run that finds "nothing new" is a no-op except for the IMAP/GitHub fetch overhead. To force a clean re-ingest, delete the relevant state file or pass `--reingest` on a manual run.
 
 ## Storage & persistence (technical)
 
