@@ -73,7 +73,13 @@ from pathlib import Path
 from graphiti_client import GraphitiClient, GraphitiError
 
 STATE_FILE = ".pb-graphiti-ingest.json"
-MAX_EPISODE_CHARS = 30000
+MAX_EPISODE_CHARS = 100000  # Raised from 30k for consistency with ingest_tickets
+# after a live case (pvc #361) showed long ticket threads were truncated mid-
+# discussion, chopping the highest-value extractable content. Email threads
+# carry the same risk — contract negotiations, vendor support threads, and
+# project-status chains routinely exceed 30k. 100k handles all but the
+# longest threads while keeping per-thread Haiku cost bounded (~$0.005-0.015
+# per call in practice).
 
 
 class HTMLStripper(html.parser.HTMLParser):
