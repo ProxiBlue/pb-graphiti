@@ -280,6 +280,268 @@ Indicative for a solo developer writing ~5 episodes/day across ~10 projects:
 
 Heavy fleet writers (50+ episodes/day, 50+ projects) will see Haiku creep toward ~$10/month. Embedder usage stays well inside Voyage free tier.
 
+## Troubleshooting
+
+### Identifying which ingestion channel produced an episode
+
+Episodes don't carry an explicit "ingestion source" field, but every channel writes a distinct `source_description` shape, so you can classify them with a string-prefix check:
+
+| Channel | `source_description` pattern |
+|---|---|
+| `/pb-graphiti:ingest-folder` | `file:///<absolute-path>` (file URI; no trailing slash on the file itself) |
+| `/pb-graphiti:ingest-magento-modules` | `file:///<absolute-path-to-module-dir>/` (trailing slash — module directory) |
+| `/pb-graphiti:ingest-slack` (with `--workspace-slug`) | `https://<workspace>.slack.com/archives/<channel-id> (<YYYY-MM-DD>)` |
+| `/pb-graphiti:ingest-slack` (no slug) | `slack:<channel>:<YYYY-MM-DD>` |
+| `/pb-graphiti:ingest-tickets` | `https://github.com/<owner>/<repo>/issues/<n>` (or `/pull/<n>`) |
+| `/pb-graphiti:ingest-email` | `mid:<Message-ID>` |
+| PreCompact consolidation hook | `claude-code-session://<session_id> [precompact <YYYY-MM-DD>]` |
+| Manual `add_memory` | whatever the caller passed (often opaque) |
+
+### Counting episodes per channel per project
+
+Open the Neo4j browser at `http://localhost:7474` (or use the HTTP API). Cypher:
+
+```cypher
+MATCH (ep:Episodic)
+WITH ep.group_id AS gid,
+     CASE
+       WHEN ep.source_description STARTS WITH 'https://github.com/'         THEN 'github-tickets'
+       WHEN ep.source_description STARTS WITH 'mid:'                         THEN 'email'
+       WHEN ep.source_description STARTS WITH 'claude-code-session://'       THEN 'precompact-hook'
+       WHEN ep.source_description STARTS WITH 'https://' AND ep.source_description CONTAINS '.slack.com/' THEN 'slack-permalinked'
+       WHEN ep.source_description STARTS WITH 'slack:'                       THEN 'slack-opaque'
+       WHEN ep.source_description STARTS WITH 'file://' AND ep.source_description ENDS WITH '/' THEN 'magento-module'
+       WHEN ep.source_description STARTS WITH 'file://'                      THEN 'folder-doc'
+       ELSE 'other/unknown'
+     END AS channel
+RETURN gid, channel, count(*) AS episodes
+ORDER BY gid, episodes DESC;
+```
+
+### Selectively wiping one channel (worked example: GitHub tickets only)
+
+**Use case:** you want to drop all GitHub-ticket episodes from `lcd-mageos` (e.g., to re-ingest with tighter filters) without touching modules, Slack, email, or hook-written facts.
+
+**Step 1 — preview what would be deleted.** Always run this first.
+
+```cypher
+MATCH (ep:Episodic)
+WHERE ep.group_id = 'lcd-mageos'
+  AND ep.source_description STARTS WITH 'https://github.com/'
+RETURN count(ep) AS would_delete;
+```
+
+If the count looks right, proceed. If it's surprisingly large or small, recheck your `WHERE` clauses before running the delete.
+
+**Step 2 — delete the episodes.**
+
+```cypher
+MATCH (ep:Episodic)
+WHERE ep.group_id = 'lcd-mageos'
+  AND ep.source_description STARTS WITH 'https://github.com/'
+DETACH DELETE ep;
+```
+
+`DETACH DELETE` removes the episode node AND its `MENTIONS` edges to any extracted entities. Entities themselves are NOT deleted in this step — Graphiti's entities are aggregated across many source episodes, so an entity like a vendor name may still be referenced by module or Slack episodes after the tickets are gone. That's intentional.
+
+**Step 3 — clean up orphaned entities.** After Step 2, some entities may have no remaining `MENTIONS` edges (i.e., they only ever appeared in ticket episodes). Remove them:
+
+```cypher
+MATCH (e:Entity)
+WHERE e.group_id = 'lcd-mageos'
+  AND NOT EXISTS { MATCH (:Episodic)-[:MENTIONS]->(e) }
+DETACH DELETE e;
+```
+
+This step is safe: it only deletes entities that no surviving episode references, so entities still mentioned by modules/Slack/email survive automatically.
+
+**Step 4 — verify.**
+
+```cypher
+MATCH (n)
+WHERE n.group_id = 'lcd-mageos'
+RETURN labels(n) AS labels, count(*) AS c
+ORDER BY c DESC;
+```
+
+You should see the Episodic count drop by the ticket count and entity counts reduced by any orphans. Modules / Slack / email episodes and their entities should be untouched.
+
+### Pattern variations for the other channels
+
+Substitute the `STARTS WITH` clause in Step 1 and Step 2:
+
+```cypher
+-- Wipe all Slack ingest (both permalinked and opaque variants)
+AND (ep.source_description CONTAINS '.slack.com/' OR ep.source_description STARTS WITH 'slack:')
+
+-- Wipe all email ingest
+AND ep.source_description STARTS WITH 'mid:'
+
+-- Wipe all Magento-module ingest (file:// URIs ending in /)
+AND ep.source_description STARTS WITH 'file://' AND ep.source_description ENDS WITH '/'
+
+-- Wipe all folder-doc ingest (file:// URIs NOT ending in /)
+AND ep.source_description STARTS WITH 'file://' AND NOT ep.source_description ENDS WITH '/'
+
+-- Wipe everything written by the PreCompact consolidation hook
+AND ep.source_description STARTS WITH 'claude-code-session://'
+```
+
+### After a selective wipe, fix the dedupe state file
+
+The `.pb-graphiti-ingest.json` state file in the cwd where you ran the original ingest contains hashes of every successfully-written episode. After wiping that channel from the graph, the next re-ingest will skip everything (dedupe-hits). Either:
+
+- Delete the state file, OR
+- Pass `--reingest` on the next ingest run.
+
+Otherwise you'll wipe the graph, re-run the ingest, and see "nothing to do (all up to date)" — confusing.
+
+### Exploring the graph — common Neo4j Browser queries
+
+Open the Neo4j Browser at `http://localhost:7474` (login: `neo4j` / your `NEO4J_PASSWORD`). All queries below scope by `group_id` — change `'lcd-mageos'` to your project id (or `'fleet'`, `'initial_ingest'`).
+
+#### Browser settings worth setting once
+
+Run these in the browser command bar — they persist as Browser settings:
+
+```
+:config initialNodeDisplay: 25
+:config maxNeighbours: 20
+:config maxRows: 500
+```
+
+Without these the Browser silently truncates at 1000 nodes on result graphs and 1000 rows on tabular returns. If your project has 10,000+ nodes, you'll see incomplete pictures and not realize it.
+
+#### Project overview — counts by node type
+
+```cypher
+MATCH (n) WHERE n.group_id = 'lcd-mageos'
+RETURN labels(n) AS type, count(*) AS count
+ORDER BY count DESC;
+```
+
+#### View a small subgraph for visual exploration
+
+The full project graph is too big to render — start with a small slice and expand by double-clicking nodes in the Browser:
+
+```cypher
+// Top 25 most-connected entities (graph "hubs") for this project
+MATCH (e:Entity {group_id: 'lcd-mageos'})
+OPTIONAL MATCH (e)-[r]-()
+WITH e, count(r) AS connections
+ORDER BY connections DESC
+LIMIT 25
+RETURN e;
+```
+
+```cypher
+// Most-recent 30 episodes — pairs with their extracted entities
+MATCH (ep:Episodic {group_id: 'lcd-mageos'})
+WITH ep ORDER BY ep.created_at DESC LIMIT 30
+OPTIONAL MATCH (ep)-[r:MENTIONS]->(e:Entity)
+RETURN ep, r, e;
+```
+
+#### List entities by label/type
+
+```cypher
+// All Vendors
+MATCH (e:Entity:Vendor {group_id: 'lcd-mageos'})
+RETURN e.name AS name, e.summary AS summary
+ORDER BY e.name;
+
+// All Decisions with their rationale
+MATCH (e:Entity:Decision {group_id: 'lcd-mageos'})
+RETURN e.name, e.summary
+ORDER BY e.created_at DESC;
+
+// All Incidents
+MATCH (e:Entity:Incident {group_id: 'lcd-mageos'})
+RETURN e.name, e.summary, e.created_at
+ORDER BY e.created_at DESC;
+```
+
+Available entity labels (from `infra/config/config.yaml` entity_types): `Vendor`, `Decision`, `Incident`, `Project`, `Client`, `Procedure`, `Component`, `Preference`, `Topic`. Plus the generic `Entity` for anything that didn't get a specialized type.
+
+#### Find an entity by name (fuzzy)
+
+```cypher
+MATCH (e:Entity {group_id: 'lcd-mageos'})
+WHERE toLower(e.name) CONTAINS 'tax'
+RETURN labels(e) AS labels, e.name, e.summary
+LIMIT 20;
+```
+
+#### Trace provenance — for an entity, show the source episodes
+
+```cypher
+MATCH (e:Entity {group_id: 'lcd-mageos'})
+WHERE e.name = 'Honeycomb'
+OPTIONAL MATCH (ep:Episodic)-[:MENTIONS]->(e)
+RETURN e.name AS entity, e.summary AS summary,
+       collect({name: ep.name, source: ep.source_description, when: ep.created_at}) AS episodes;
+```
+
+#### Recently added (last 24 hours)
+
+```cypher
+MATCH (ep:Episodic)
+WHERE ep.created_at >= datetime() - duration({hours: 24})
+RETURN ep.group_id, ep.name, ep.source_description, ep.created_at
+ORDER BY ep.created_at DESC;
+```
+
+#### Episodes from one channel, scoped to project
+
+```cypher
+// All GitHub ticket episodes from lcd-mageos
+MATCH (ep:Episodic {group_id: 'lcd-mageos'})
+WHERE ep.source_description STARTS WITH 'https://github.com/'
+RETURN ep.name, ep.source_description, ep.created_at
+ORDER BY ep.created_at DESC
+LIMIT 50;
+```
+
+#### Two-hop walk — find entities connected to a starting entity
+
+```cypher
+// What is "ProxiBlue" connected to in lcd-mageos?
+MATCH (start:Entity {group_id: 'lcd-mageos', name: 'ProxiBlue'})-[r1]-(neighbor)-[r2]-(second)
+WHERE second.group_id = 'lcd-mageos'
+RETURN start, r1, neighbor, r2, second
+LIMIT 50;
+```
+
+In the Browser this renders as a small subgraph — drag, expand, explore.
+
+#### Storage size sanity check
+
+```cypher
+// Episode size distribution per project — useful when chasing token cost
+MATCH (ep:Episodic)
+WITH ep.group_id AS gid, size(ep.content) AS chars
+RETURN gid,
+       count(*) AS episodes,
+       sum(chars) AS total_chars,
+       avg(chars) AS avg_chars,
+       max(chars) AS max_chars
+ORDER BY total_chars DESC;
+```
+
+```cypher
+// Top 10 biggest individual episodes (candidates for truncation review)
+MATCH (ep:Episodic)
+RETURN ep.group_id, ep.name, size(ep.content) AS chars, ep.source_description
+ORDER BY chars DESC
+LIMIT 10;
+```
+
+### A note on node-cap surprises
+
+Neo4j Browser caps rendered graphs at 1000 nodes by default. If you run `MATCH (n {group_id: 'pvcpipesupplies'}) RETURN n` and see exactly 1000 nodes back, that's the cap — your actual count may be higher. Either tighten the query (filter by label, time, name pattern) or raise `:config maxRows` and accept slower render.
+
+For programmatic use (the HTTP API at `/db/neo4j/tx/commit`), there's no implicit cap — `LIMIT` is whatever you write.
+
 ## Companion plugins / related work
 
 - [`pb-gitnexus`](https://github.com/proxiblue/pb-gitnexus) — structural code graph (gitnexus) for Magento / Mage-OS. Pairs well: gitnexus = code structure, pb-graphiti = domain knowledge.
