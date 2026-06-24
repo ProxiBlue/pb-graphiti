@@ -10,7 +10,7 @@
       "source": "./",
       "description": "Shared temporal knowledge graph for cross-project / cross-session memory. Bundles MCP client config + write/query discipline skill + docker-compose recipe for the host-side Neo4j + Graphiti stack. Multi-project namespacing via per-call group_id.",
       "version": "0.9.3",
-      "license": "MIT",
+      "license": "Apache-2.0",
       "keywords": [
         "graphiti",
         "neo4j",
