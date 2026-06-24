@@ -228,6 +228,15 @@ Pass `--require-relevance` to **refuse to run** unless an address allowlist or k
 
 `--since YYYY-MM-DD` is a server-side IMAP filter; `--min-words` to drop auto-replies (default 10); `--min-thread-messages` to drop one-offs. Code-entity suppression on by default (same rationale as tickets).
 
+#### Batching for large mailboxes
+
+A single IMAP session can only fetch so many messages before the provider drops the socket (Zoho closes around 2,000-3,000 messages; Gmail similar; Microsoft varies). For back-fills covering more than a few months, use:
+
+- `--batch-days N` (default 30) — splits `[--since, today]` into N-day windows; each window uses a fresh IMAP session. Lower to 7 or 3 for dense mailboxes.
+- `--parallel-workers N` (default 1) — runs N batch windows concurrently; each opens its own IMAP connection. Bump to 2-4 for big back-fills. Respect provider concurrent-connection caps (Zoho ≈5, Gmail ≈15, Fastmail ≈2/IP).
+
+The dedupe state file means a partial run (e.g., 5 batches succeeded then a connection dropped) can be resumed by simply re-running — already-ingested threads are skipped. If a batch warns "failed" with a socket error, halve `--batch-days` and re-run.
+
 `source_description` is `mid:<Message-ID>` of the thread root — RFC 2392 URI that opens in mail clients respecting the scheme.
 
 Best for: client mailboxes with project-specific subject prefixes, vendor correspondence threads, contract negotiation history.

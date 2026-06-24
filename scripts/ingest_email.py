@@ -21,6 +21,15 @@ Filters:
 - --min-words N — drop messages under N words (filters auto-reply noise)
 - --min-thread-messages N — drop threads with fewer than N surviving messages
 
+Batching (for large mailboxes):
+- --batch-days N — split [since, today] into N-day windows; each window
+  uses its own IMAP session. Default 30 days. Without this, big mailboxes
+  (Zoho closes the socket at ~2000-3000 messages, Gmail similar) fail mid-fetch.
+- --parallel-workers N — run that many batch windows in parallel; each
+  worker opens its own IMAP connection. Default 1. Bump to 2-4 for big
+  back-fills. Respect your provider's concurrent-connection limit (Zoho:
+  ~5; Gmail: ~15; Fastmail: ~2 per IP).
+
 Auth: password is read from env var (--password-env IMAP_PASSWORD by default)
 to avoid leaking it on the CLI / in process listings. Use an app password,
 not your account password, for Gmail / Microsoft etc.
@@ -56,7 +65,9 @@ import json
 import os
 import re
 import sys
+import threading
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from graphiti_client import GraphitiClient, GraphitiError
@@ -270,6 +281,88 @@ def fetch_message(M: imaplib.IMAP4, uid: str) -> email.message.Message | None:
     return email.message_from_bytes(data[0][1])
 
 
+def date_chunks(start: datetime.date, end: datetime.date, days: int) -> list[tuple[datetime.date, datetime.date]]:
+    """Split [start, end) into chunks of `days` length. Last chunk may be shorter."""
+    out: list[tuple[datetime.date, datetime.date]] = []
+    cur = start
+    step = datetime.timedelta(days=days)
+    while cur < end:
+        nxt = min(cur + step, end)
+        out.append((cur, nxt))
+        cur = nxt
+    return out
+
+
+def fmt_imap_date(d: datetime.date) -> str:
+    return d.strftime("%d-%b-%Y")
+
+
+def fetch_batch(
+    chunk_start: datetime.date,
+    chunk_end: datetime.date,
+    *,
+    imap_host: str,
+    imap_port: int,
+    imap_user: str,
+    imap_password: str,
+    folder: str,
+    allowed_addrs: set[str] | None,
+    log_prefix: str = "",
+) -> tuple[dict[str, list[tuple[str, email.message.Message]]], dict[str, str], int]:
+    """Open a fresh IMAP session, fetch all messages in [chunk_start, chunk_end),
+    apply the address gate, group by thread key.
+
+    Returns (threads, thread_root_id_map, dropped_address_count).
+
+    Raises on connection / login failure so the caller can retry or surface.
+    """
+    M = imaplib.IMAP4_SSL(imap_host, imap_port)
+    try:
+        M.login(imap_user, imap_password)
+        typ, _ = M.select(folder, readonly=True)
+        if typ != "OK":
+            raise RuntimeError(f"cannot select folder {folder!r}")
+
+        search_terms = ["SINCE", fmt_imap_date(chunk_start), "BEFORE", fmt_imap_date(chunk_end)]
+        uids = fetch_uids(M, search_terms)
+        print(f"{log_prefix}[{chunk_start} → {chunk_end}] {len(uids)} UID(s)", file=sys.stderr)
+
+        threads: dict[str, list[tuple[str, email.message.Message]]] = defaultdict(list)
+        thread_root_id: dict[str, str] = {}
+        dropped_address = 0
+        for uid in uids:
+            msg = fetch_message(M, uid)
+            if msg is None:
+                continue
+            if allowed_addrs is not None:
+                participants = message_participants(msg)
+                if not passes_address_gate(participants, allowed_addrs):
+                    dropped_address += 1
+                    continue
+            refs = (msg.get("References") or "").split()
+            in_reply_to = (msg.get("In-Reply-To") or "").strip()
+            msg_id = (msg.get("Message-ID") or "").strip()
+            if refs:
+                thread_key = refs[0]
+            elif in_reply_to:
+                thread_key = in_reply_to
+            else:
+                thread_key = "subject:" + normalize_subject(decode_header_value(msg.get("Subject")))
+            threads[thread_key].append((uid, msg))
+            if thread_key not in thread_root_id and msg_id:
+                thread_root_id[thread_key] = msg_id
+        return dict(threads), thread_root_id, dropped_address
+    finally:
+        try:
+            M.close()
+        except imaplib.IMAP4.error:
+            pass
+        try:
+            M.logout()
+        except imaplib.IMAP4.error:
+            pass
+
+
 def render_message(msg: email.message.Message, uid: str, min_words: int) -> str | None:
     from_ = decode_header_value(msg.get("From"))
     date_raw = msg.get("Date") or ""
@@ -315,6 +408,14 @@ def main() -> int:
                     help="Drop threads with fewer than N surviving messages (default 1)")
     ap.add_argument("--include-code-entities", action="store_true",
                     help="Allow extraction of file paths / class names. Default OFF — code belongs in GitNexus.")
+    # Batching (for large mailboxes — Zoho/Gmail close sockets on long fetches)
+    ap.add_argument("--batch-days", type=int, default=30,
+                    help="Split [--since, today] into N-day windows; each window uses its own IMAP session. "
+                         "Default 30. Lower for mailboxes with very high message density.")
+    ap.add_argument("--parallel-workers", type=int, default=1,
+                    help="Run that many batch windows concurrently (each opens its own IMAP connection). "
+                         "Default 1. Bump to 2-4 for big back-fills. Respect your provider's concurrent "
+                         "connection cap (Zoho ~5, Gmail ~15, Fastmail ~2/IP).")
     # IO / dedupe
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--reingest", action="store_true")
@@ -345,67 +446,55 @@ def main() -> int:
     state = {} if args.reingest else load_state(state_path)
     seen = set(state.get(args.group_id, []))
 
-    # Connect
-    print(f"connecting to {args.imap_host}:{args.imap_port} as {args.imap_user}...", file=sys.stderr)
+    # Split the date range into batches. Each batch opens its own IMAP
+    # session so big mailboxes (Zoho closes the socket at ~2-3k messages,
+    # Gmail similar) succeed instead of mid-fetch dying.
+    today = datetime.date.today() + datetime.timedelta(days=1)  # +1 so IMAP BEFORE includes today
+    chunks = date_chunks(since_date, today, args.batch_days)
+    print(f"splitting [{since_date} → {today}] into {len(chunks)} batch(es) of up to {args.batch_days} day(s); "
+          f"workers={args.parallel_workers}", file=sys.stderr)
+
+    threads: dict[str, list[tuple[str, email.message.Message]]] = defaultdict(list)
+    thread_root_id: dict[str, str] = {}
+    dropped_address = 0
+
+    fetch_kwargs = dict(
+        imap_host=args.imap_host,
+        imap_port=args.imap_port,
+        imap_user=args.imap_user,
+        imap_password=password,
+        folder=args.folder,
+        allowed_addrs=allowed_addrs,
+    )
+
+    def merge(batch_result):
+        nonlocal dropped_address
+        b_threads, b_root_id, b_dropped = batch_result
+        for k, msgs in b_threads.items():
+            threads[k].extend(msgs)
+            if k not in thread_root_id and k in b_root_id:
+                thread_root_id[k] = b_root_id[k]
+        dropped_address += b_dropped
+
     try:
-        M = imaplib.IMAP4_SSL(args.imap_host, args.imap_port)
-        M.login(args.imap_user, password)
+        if args.parallel_workers <= 1:
+            for i, (s, e) in enumerate(chunks, 1):
+                merge(fetch_batch(s, e, log_prefix=f"[batch {i}/{len(chunks)}] ", **fetch_kwargs))
+        else:
+            with ThreadPoolExecutor(max_workers=args.parallel_workers) as ex:
+                future_to_chunk = {}
+                for i, (s, e) in enumerate(chunks, 1):
+                    fut = ex.submit(fetch_batch, s, e, log_prefix=f"[batch {i}/{len(chunks)}] ", **fetch_kwargs)
+                    future_to_chunk[fut] = (s, e)
+                for fut in as_completed(future_to_chunk):
+                    s, e = future_to_chunk[fut]
+                    try:
+                        merge(fut.result())
+                    except Exception as batch_err:
+                        print(f"WARN: batch [{s} → {e}] failed: {batch_err}", file=sys.stderr)
     except (imaplib.IMAP4.error, OSError) as e:
-        print(f"ERROR: IMAP connect/login failed: {e}", file=sys.stderr)
+        print(f"ERROR: IMAP failure: {e}", file=sys.stderr)
         return 1
-
-    try:
-        typ, _ = M.select(args.folder, readonly=True)
-        if typ != "OK":
-            print(f"ERROR: cannot select folder {args.folder!r}", file=sys.stderr)
-            return 1
-
-        # Server-side coarse cut: SINCE date.
-        # Address-list matching happens client-side because IMAP OR-chains for
-        # many addresses across multiple header fields get unreadable fast and
-        # don't cover Cc/Bcc on all server implementations. The SINCE filter
-        # alone usually narrows the candidate set enough.
-        imap_since = since_date.strftime("%d-%b-%Y")
-        search_terms: list[str] = ["SINCE", imap_since]
-
-        print(f"searching with: {' '.join(search_terms)}", file=sys.stderr)
-        uids = fetch_uids(M, search_terms)
-        print(f"  {len(uids)} message UID(s) matched", file=sys.stderr)
-
-        # Fetch and group by thread
-        threads: dict[str, list[tuple[str, email.message.Message]]] = defaultdict(list)
-        thread_root_id: dict[str, str] = {}  # thread_key -> first Message-ID seen
-        dropped_address = 0
-        for uid in uids:
-            msg = fetch_message(M, uid)
-            if msg is None:
-                continue
-            # Client-side address gate — runs BEFORE thread grouping so unrelated
-            # messages don't pull whole threads in via shared subject normalization.
-            if allowed_addrs is not None:
-                participants = message_participants(msg)
-                if not passes_address_gate(participants, allowed_addrs):
-                    dropped_address += 1
-                    continue
-            refs = (msg.get("References") or "").split()
-            in_reply_to = (msg.get("In-Reply-To") or "").strip()
-            msg_id = (msg.get("Message-ID") or "").strip()
-            if refs:
-                thread_key = refs[0]  # First-in-thread Message-ID
-            elif in_reply_to:
-                thread_key = in_reply_to
-            else:
-                # Fall back to normalized subject — groups when headers are missing
-                thread_key = "subject:" + normalize_subject(decode_header_value(msg.get("Subject")))
-            threads[thread_key].append((uid, msg))
-            if thread_key not in thread_root_id and msg_id:
-                thread_root_id[thread_key] = msg_id
-    finally:
-        try:
-            M.close()
-        except imaplib.IMAP4.error:
-            pass
-        M.logout()
 
     print(f"  grouped into {len(threads)} thread(s)" +
           (f"  ({dropped_address} message(s) dropped by --addresses gate)" if dropped_address else ""),

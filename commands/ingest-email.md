@@ -70,8 +70,21 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/ingest_email.py" \
   --require-relevance \
   --since "<YYYY-MM-DD>" \
   --include-keywords "<comma-separated>" \
+  --batch-days 30 \
+  --parallel-workers 1 \
   --dry-run
 ```
+
+**Picking `--batch-days` and `--parallel-workers`:**
+
+The script splits the `[--since, today]` range into windows and uses a fresh IMAP session per window. This is necessary on big mailboxes — providers (Zoho, Gmail, Microsoft) close the socket when a single session fetches more than ~2-3k messages.
+
+- Default `--batch-days 30` works for typical inboxes (~50-200 messages/month).
+- For very dense mailboxes (>1000 messages/month), lower to `--batch-days 7` or `--batch-days 3`.
+- For back-fills covering multiple years, bump `--parallel-workers` to 2-4. Respect your provider's concurrent connection cap: Zoho ≈5, Gmail ≈15, Fastmail ≈2/IP.
+- For first-run smoke tests on a new mailbox, keep `--parallel-workers 1` so logs are sequential and easy to read.
+
+If the script reports a "batch ... failed" warning with a socket error, halve `--batch-days` and re-run. The dedupe state file means already-ingested threads from successful batches will be skipped.
 
 Show: thread count, group_id, first ~15 entries with sizes. The script reports how many messages were dropped by the address gate vs. the keyword gate vs. the min-words/min-thread filters — relay that summary so the user can see whether the filters are too loose or too tight. Heads-up the cost — each thread = one Anthropic Haiku call. 100 threads ≈ $0.50-1.50.
 
@@ -101,7 +114,9 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/ingest_email.py" \
   --addresses "$ARGUMENTS" \
   --require-relevance \
   --since "<YYYY-MM-DD>" \
-  --include-keywords "<keywords>"
+  --include-keywords "<keywords>" \
+  --batch-days <same-as-dry-run> \
+  --parallel-workers <same-as-dry-run>
 ```
 
 Report `done: wrote N, failed M`.
