@@ -43,7 +43,13 @@ from typing import Iterable
 from graphiti_client import GraphitiClient, GraphitiError
 
 STATE_FILE = ".pb-graphiti-ingest.json"
-MAX_EPISODE_CHARS = 30000  # Cap per-ticket body to keep embedding cost sane
+MAX_EPISODE_CHARS = 100000  # Cap per-ticket body. Raised from 30k after a
+# live case where ticket #361 (63 comments, full deploy-sequence runbook in
+# the comment thread) was truncated at 30k and the deploy sequence got
+# chopped before Graphiti's extractor ever saw it. 100k handles most
+# heavily-discussed tickets while keeping per-ticket Haiku cost bounded
+# (each call still ~$0.005-0.015 in practice). For threads bigger than
+# this, the remaining strategy is per-comment chunking — future work.
 
 
 def load_state(state_path: Path) -> dict[str, list[str]]:
