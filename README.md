@@ -346,7 +346,16 @@ Recommended schedule:
 
 ### Inside a DDEV container
 
-DDEV's web container crontab doesn't survive `ddev restart` unless persisted via `.ddev/web-build/`. Drop a file at `.ddev/web-build/pb-graphiti-cron` containing the schedule and add a `COPY ... /etc/cron.d/` + `RUN chmod 644` to your `.ddev/web-build/Dockerfile`. The `/pb-graphiti:automate` command walks you through this. Once installed, the cron stays put across `ddev rebuild`.
+DDEV's web container crontab doesn't survive `ddev restart` unless persisted via `.ddev/web-build/`. Drop a file at `.ddev/web-build/pb-graphiti.cron` containing the schedule. The `/pb-graphiti:automate` command walks you through this. Once installed, the cron stays put across `ddev rebuild`.
+
+Many DDEV projects already have a `Dockerfile.ddev-cron` (or similar) that copies `*.cron` files from `.ddev/web-build/` into `/etc/cron.d/`. The `/pb-graphiti:automate` command checks for that pattern and reuses it — only creating a new Dockerfile if no existing one already handles the copy.
+
+**Critical for DDEV: do NOT put the env file under `$HOME`.** `$HOME` (`/home/<user>`) inside the web container is an overlay filesystem that is wiped on `ddev restart`. Use the host-mounted project directory instead:
+
+- `PB_GRAPHITI_HOME=/var/www/html/.pb-graphiti`
+- `PB_GRAPHITI_ENV=/var/www/html/.pb-graphiti/env`
+
+Set both as env vars at the top of `.ddev/web-build/pb-graphiti.cron` so the wrappers find the env file regardless of which user runs them. The cron file template from `/pb-graphiti:automate` does this automatically. Add `/.pb-graphiti/env` (or `/.pb-graphiti/` for the whole state directory) to your project's `.gitignore` so secrets don't slip into version control.
 
 In-container vs host:
 - **In-container** gets `$DDEV_PROJECT` auto-set, MCP reaches via `host.docker.internal`, scripts are mounted at `/var/www/html/.claude/plugins-seed/marketplaces/pb-graphiti/`. Self-contained per project. Stops when DDEV stops — usually fine.
