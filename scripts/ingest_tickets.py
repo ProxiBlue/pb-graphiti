@@ -62,7 +62,11 @@ def save_state(state_path: Path, state: dict[str, list[str]]) -> None:
 def gh_api(path: str, *extra_args: str) -> list[dict] | dict:
     """Shell out to `gh api --paginate <path> <extra-args>`. Returns parsed JSON.
 
-    Raises CalledProcessError on non-zero exit. Caller should handle.
+    Raises CalledProcessError on non-zero exit, JSONDecodeError on malformed
+    output (gh can return truncated payloads when rate-limited), or OSError
+    on process-level failures. Callers should catch the union to degrade
+    gracefully on per-item fetches (e.g., comments for one ticket) and to
+    fail loudly on bulk fetches (e.g., the initial issue listing).
     """
     cmd = ["gh", "api", "--paginate", path, *extra_args]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -206,6 +210,16 @@ def main() -> int:
     except subprocess.CalledProcessError as e:
         print(f"ERROR: gh api failed: {e.stderr.strip()}", file=sys.stderr)
         return 2
+    except json.JSONDecodeError as e:
+        # Malformed JSON from gh — most commonly mid-pagination rate-limit
+        # truncation. Fail loudly: silent partial coverage is worse than a
+        # clear error because the user thinks they ingested everything.
+        print(f"ERROR: gh api returned malformed JSON (possible rate-limit / truncation): {e}", file=sys.stderr)
+        print("       Re-running typically recovers — the rate limit window resets in ~1 hour.", file=sys.stderr)
+        return 2
+    except (OSError, IOError) as e:
+        print(f"ERROR: gh api subprocess failed: {e}", file=sys.stderr)
+        return 2
     except FileNotFoundError:
         print("ERROR: `gh` CLI not found. Install it or run from a shell where it's on PATH.", file=sys.stderr)
         return 2
@@ -232,14 +246,19 @@ def main() -> int:
             skipped_label += 1
             continue
 
-        # Fetch comments separately (the /issues listing doesn't include them)
+        # Fetch comments separately (the /issues listing doesn't include them).
+        # Widen the catch so JSON-decode / process errors degrade to "no
+        # comments" rather than aborting the whole ingest loop. The ticket
+        # is still ingested (its description carries most of the value); the
+        # comments just aren't included that pass.
         try:
             comments = gh_api(
                 f"/repos/{args.repo}/issues/{num}/comments",
                 "-X", "GET",
                 "-f", "per_page=100",
             )
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, json.JSONDecodeError, OSError) as e:
+            print(f"  WARN: comments fetch failed for #{num}: {type(e).__name__}: {e}", file=sys.stderr)
             comments = []
         if not isinstance(comments, list):
             comments = []
@@ -249,7 +268,14 @@ def main() -> int:
             skipped_comments += 1
             continue
 
-        body, ref_time = build_episode_body(t, comments, include_bots=args.include_bots)
+        # Wrap body-building so a malformed body (encoding edge case, broken
+        # markdown, surprise None field) skips one ticket instead of crashing
+        # the whole loop. Silent total-coverage drop is the worst outcome.
+        try:
+            body, ref_time = build_episode_body(t, comments, include_bots=args.include_bots)
+        except Exception as e:
+            print(f"  WARN: could not render body for #{num} — skipping: {type(e).__name__}: {e}", file=sys.stderr)
+            continue
         h = hashlib.sha256(f"{args.repo}#{num}:{body[:500]}".encode("utf-8")).hexdigest()[:16]
         if h in seen:
             skipped_dedup += 1
