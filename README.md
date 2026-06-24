@@ -674,6 +674,27 @@ For programmatic use (the HTTP API at `/db/neo4j/tx/commit`), there's no implici
 - [`pb-gitnexus`](https://github.com/proxiblue/pb-gitnexus) — structural code graph (gitnexus) for Magento / Mage-OS. Pairs well: gitnexus = code structure, pb-graphiti = domain knowledge.
 - Built-in Claude Code auto-memory — keep using it for hard rules.
 
+## Attributions & licensing
+
+This plugin (`pb-graphiti`) is **MIT-licensed**. The wrapper code, ingest scripts, slash commands, hooks, and configuration are all original work, redistributable under MIT.
+
+The plugin orchestrates and depends on third-party software that is **NOT redistributed in this repository** — consumers fetch and run those components themselves:
+
+| Component | License | How this plugin uses it |
+|---|---|---|
+| [Graphiti](https://github.com/getzep/graphiti) (graphiti-core + MCP server) | **Apache 2.0** © Zep AI, Inc. | The plugin's bootstrap instructions ask consumers to `git clone https://github.com/getzep/graphiti upstream` themselves; the docker-compose builds an image locally from that clone. No Graphiti source is bundled here. |
+| [Neo4j Community Edition](https://github.com/neo4j/neo4j) (5.26.0) | **GPLv3** (Community); commercial for Enterprise | Pulled as the upstream `neo4j:5.26.0` Docker image at run time; not redistributed by this repo. The plugin only uses Community-tier features (no online backup, no clustering, no read replicas). |
+| [Anthropic Claude API](https://docs.anthropic.com) | Commercial — Anthropic Usage Policy | Used as the LLM backend for entity extraction via the consumer's own API key. Not redistributed. |
+| [Voyage AI](https://www.voyageai.com) embeddings | Commercial — generous free tier | Used as the embedder via the consumer's own API key. Not redistributed. |
+
+**Apache 2.0 compliance:** because Graphiti is fetched by the consumer (not bundled here), we are NOT redistributing it and the Apache 2.0 redistribution obligations (include LICENSE, NOTICE, modification disclosures) don't apply to this repository. If you fork this plugin and start bundling Graphiti's source directly (e.g., as a git submodule with shipped binaries), you become a redistributor and MUST include Graphiti's `LICENSE` and `NOTICE` files in your distribution and disclose any modifications to Graphiti's source.
+
+**GPLv3 on Neo4j Community:** the plugin invokes Neo4j over its network protocol (Bolt) and HTTP API. Network-protocol use is not "linking" under the GPL — the plugin does not statically or dynamically link to Neo4j code. Consumers run Neo4j as an independent process via Docker. No GPLv3 obligations propagate to this MIT-licensed code.
+
+**MIT for the plugin itself:** see [LICENSE](./LICENSE). The MIT permission to "use, copy, modify, merge, publish, distribute, sublicense, and/or sell" is fully compatible with depending on Apache 2.0 (Graphiti) and GPLv3 (Neo4j) software via the documented orchestration pattern.
+
+If you spot a license compliance gap, open an issue at https://github.com/ProxiBlue/pb-graphiti/issues.
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).
