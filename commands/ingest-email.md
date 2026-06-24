@@ -5,17 +5,31 @@ argument-hint: <address-to-filter> --since YYYY-MM-DD [--folder INBOX] [--includ
 
 You are about to ingest emails into Graphiti. Follow this procedure.
 
-## Step 1 — collect credentials
+## Step 1 — confirm IMAP connection is configured
 
-The script needs (in order):
-- IMAP host (e.g. `imap.gmail.com`, `imap.fastmail.com`, `mail.example.com`)
-- IMAP user (the email address)
-- Password — **MUST come from an env var**, not a CLI flag. Default env name `IMAP_PASSWORD`. **Use an app password**, not your real account password. Most providers offer this in security settings; Gmail requires 2FA + app passwords.
+The connection details are stored as plugin `userConfig` (set at plugin-enable time or via `/plugin config pb-graphiti`):
 
-If the user hasn't set the env var, prompt them to do so first (don't echo the password back). Example:
+- `imap_host` (e.g. `imap.gmail.com`, `imap.fastmail.com`, `mail.example.com`)
+- `imap_port` (default `993` — IMAP4 over SSL)
+- `imap_user` (the email address)
+- `imap_folder` (default `INBOX`; for Gmail-wide search use `[Gmail]/All Mail`)
+- `imap_password_env` (default `IMAP_PASSWORD` — env var NAME, not value)
+
+If `imap_host` or `imap_user` is empty, STOP. The user hasn't configured the connection. Direct them:
+
+```
+IMAP connection not configured. Run /plugin config pb-graphiti to set imap_host and imap_user,
+or edit ~/.claude/settings.json → pluginConfigs["pb-graphiti@pb-graphiti"].options to set:
+  imap_host, imap_port, imap_user, imap_folder, imap_password_env
+```
+
+The password itself is read from the env var named by `imap_password_env` (default `$IMAP_PASSWORD`). The user must set it in their shell BEFORE running the ingest. Example, without echoing:
+
 ```bash
 read -s -p "IMAP password: " IMAP_PASSWORD && export IMAP_PASSWORD
 ```
+
+**Use an app password**, not the real account password. Most providers require this for IMAP-from-external-clients; Gmail/Microsoft require 2FA + app passwords.
 
 ## Step 2 — resolve scope + relevance gate
 
@@ -47,12 +61,14 @@ Address matching covers every participant: `From`, `To`, `Cc`, `Bcc`, `Reply-To`
 python "${CLAUDE_PLUGIN_ROOT}/scripts/ingest_email.py" \
   --url "${user_config.graphiti_url}" \
   --group-id "<resolved>" \
-  --imap-host "<from-step-1>" \
-  --imap-user "<from-step-1>" \
+  --imap-host "${user_config.imap_host}" \
+  --imap-port "${user_config.imap_port}" \
+  --imap-user "${user_config.imap_user}" \
+  --folder "${user_config.imap_folder}" \
+  --password-env "${user_config.imap_password_env}" \
   --addresses "$ARGUMENTS" \
   --require-relevance \
   --since "<YYYY-MM-DD>" \
-  --folder "<INBOX or specific>" \
   --include-keywords "<comma-separated>" \
   --dry-run
 ```
@@ -77,12 +93,14 @@ Same command, no `--dry-run`. Script flushes state after every successful write 
 python "${CLAUDE_PLUGIN_ROOT}/scripts/ingest_email.py" \
   --url "${user_config.graphiti_url}" \
   --group-id "<resolved>" \
-  --imap-host "<host>" \
-  --imap-user "<user>" \
+  --imap-host "${user_config.imap_host}" \
+  --imap-port "${user_config.imap_port}" \
+  --imap-user "${user_config.imap_user}" \
+  --folder "${user_config.imap_folder}" \
+  --password-env "${user_config.imap_password_env}" \
   --addresses "$ARGUMENTS" \
   --require-relevance \
   --since "<YYYY-MM-DD>" \
-  --folder "<folder>" \
   --include-keywords "<keywords>"
 ```
 

@@ -195,7 +195,21 @@ Use for:
 
 IMAP-based email ingest. One episode per email thread (grouped by RFC 2822 References/In-Reply-To, falling back to normalized subject). HTML stripped, quoted replies trimmed, attachments noted in headers only.
 
-Auth: password read from env var (default `$IMAP_PASSWORD`) — never on the CLI. Use an **app password**, not your account password.
+#### Where the IMAP connection lives
+
+Connection details are stored as plugin `userConfig` — set them once at plugin-enable time (or any time after via `/plugin config pb-graphiti` or by editing `~/.claude/settings.json` → `pluginConfigs["pb-graphiti@pb-graphiti"].options`):
+
+| `userConfig` key | What it is | Default |
+|---|---|---|
+| `imap_host` | IMAP server hostname (`imap.gmail.com`, `imap.fastmail.com`, …) | (empty — required) |
+| `imap_port` | IMAP port | `993` |
+| `imap_user` | IMAP account login (usually full email address) | (empty — required) |
+| `imap_folder` | Folder to read (`INBOX`, `[Gmail]/All Mail`, `Archive`, …) | `INBOX` |
+| `imap_password_env` | Name of the env var holding the password | `IMAP_PASSWORD` |
+
+The password itself is **never stored in settings or on the CLI** — only the env var NAME is configured. The actual value lives in your shell environment, sourced from a password manager / `pass` / shell rc / however you handle secrets. Use an **app password** (Gmail, Microsoft, Fastmail all offer them) rather than your real account password. The script reads `os.environ[<configured-env-name>]` at runtime; if the env var is empty, the script refuses to run.
+
+Multiple mailboxes per project aren't supported via userConfig — if you need to ingest from more than one IMAP account, override the values on the CLI (`--imap-host`, `--imap-user`, etc.) and the script picks those up.
 
 #### Project-relevance filtering
 
