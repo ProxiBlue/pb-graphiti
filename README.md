@@ -309,6 +309,102 @@ Indicative for a solo developer writing ~5 episodes/day across ~10 projects:
 
 Heavy fleet writers (50+ episodes/day, 50+ projects) will see Haiku creep toward ~$10/month. Embedder usage stays well inside Voyage free tier.
 
+## Storage & persistence (technical)
+
+For operators who want to understand what's on disk, what survives, and how to back it up.
+
+### Footprint reference
+
+Measured on a real install with ~2 of 10 fleet projects fully ingested:
+
+| Metric | Value |
+|---|---|
+| Total nodes (episodes + extracted entities) | ~2,700 |
+| Total edges | ~18,000 |
+| Avg episode body size | ~6.6 KB (max ~30 KB — capped by the ingest scripts) |
+| Total episode text | ~4 MB |
+| Embedding dimensions | 512 (Voyage `voyage-3-lite`) → ~4 KB per entity |
+| **On-disk Neo4j volume** | **~550 MB** |
+
+Why the volume is much bigger than the raw text: vector embeddings on every Entity node, B-tree + vector indexes, edge metadata, Neo4j's pre-allocated page cache and transaction log.
+
+**Linear growth projection:** at the density above, expect ~250 MB per fully-ingested project. A full fleet of 10 projects → ~2.5-3 GB. Adding extensive Slack/email/ticket history per project → 5-7 GB total. Still trivial on modern storage.
+
+### What's stored where
+
+| Thing | Location | Lifecycle |
+|---|---|---|
+| Neo4j data files (the graph) | Named Docker volume `graphiti-fleet_neo4j_data` → host path `/var/lib/docker/volumes/graphiti-fleet_neo4j_data/_data` | Persists across container/image rebuilds. Tied to the volume only. |
+| Neo4j logs | Named volume `graphiti-fleet_neo4j_logs` | Persists; rotate manually if growing. |
+| MCP server (Graphiti) | Container only — no state | Rebuilt from `./upstream/` on `docker compose build`. |
+| API keys (Anthropic, Voyage) | `infra/.env` on host (gitignored) | Read at container start; loaded into env. Not stored in the data volume. |
+| Per-call config (entity types, group_id defaults) | `infra/config/config.yaml` on host | Bind-mounted into the MCP container. Changes need `docker compose restart graphiti-mcp`. |
+
+### Survival matrix — what wipes the data
+
+| Operation | Data survives? |
+|---|---|
+| `docker compose down` then `up -d` | ✅ |
+| `docker compose restart` | ✅ |
+| `docker compose build` (rebuild MCP image) | ✅ |
+| `docker compose pull` (newer Neo4j image) | ✅ |
+| Container removed + image deleted manually | ✅ — volume is independent |
+| **`docker compose down -v`** | ❌ — `-v` deletes named volumes |
+| **`docker volume rm graphiti-fleet_neo4j_data`** | ❌ |
+| **`docker system prune --volumes`** | ❌ — wipes all unused volumes |
+| Host disk failure or `/var/lib/docker` corruption | ❌ |
+
+The named volume is the protection layer. Anything that targets volumes specifically (the `-v` flag, `volume rm`, `prune --volumes`) loses everything.
+
+### Backups (recommended — currently nothing is backed up by default)
+
+Neo4j ships `neo4j-admin database dump` which produces a single-file snapshot. ~5 seconds at current size. Recipe:
+
+```bash
+# 1. Dump inside the container (writes to /data/backups within the volume)
+docker exec graphiti-neo4j neo4j-admin database dump neo4j --to-path=/data/backups
+
+# 2. Copy the dump out of the container to a host backup directory
+docker cp graphiti-neo4j:/data/backups/neo4j.dump "$HOME/backups/graphiti-$(date +%F).dump"
+
+# 3. Optional: prune dumps older than 30 days
+find "$HOME/backups/graphiti-*.dump" -mtime +30 -delete 2>/dev/null
+```
+
+Wire this into cron to run nightly:
+
+```cron
+# m h dom mon dow command
+0 2 * * * docker exec graphiti-neo4j neo4j-admin database dump neo4j --to-path=/data/backups && docker cp graphiti-neo4j:/data/backups/neo4j.dump "$HOME/backups/graphiti-$(date +\%F).dump" && find $HOME/backups/graphiti-*.dump -mtime +30 -delete
+```
+
+For off-host durability, pipe the dump through `rclone` to S3/B2/Drive after step 2.
+
+### Restore
+
+```bash
+# 1. Copy the dump file back into the container
+docker cp "$HOME/backups/graphiti-2026-06-24.dump" graphiti-neo4j:/data/backups/
+
+# 2. Load the dump (must be done while Neo4j is stopped or against a different DB)
+docker compose stop neo4j
+docker exec graphiti-neo4j neo4j-admin database load neo4j --from-path=/data/backups --overwrite-destination=true
+docker compose start neo4j
+```
+
+### Tuning notes (for when storage grows)
+
+The default heap + page cache in `infra/docker-compose.yml` is 1 GB heap + 512 MB page cache. Once the data volume exceeds the page cache, query latency creeps up (more disk I/O per query). When the data approaches 1 GB:
+
+```yaml
+environment:
+  - NEO4J_server_memory_heap_initial__size=1G
+  - NEO4J_server_memory_heap_max__size=2G
+  - NEO4J_server_memory_pagecache_size=2G   # raise to match data size
+```
+
+Restart Neo4j after editing (`docker compose up -d`).
+
 ## Troubleshooting
 
 ### Identifying which ingestion channel produced an episode
