@@ -21,7 +21,7 @@ Use both. Auto-memory for hard rules that MUST load every session. pb-graphiti f
 .claude-plugin/        plugin + marketplace manifest
 .mcp.json              MCP client config — URL prompted at enable time (default http://localhost:8765/mcp)
 skills/graphiti-usage/ SKILL.md — write/query discipline, group_id scope model
-commands/              /pb-graphiti:ingest-folder + ingest-slack + ingest-magento-modules + ingest-tickets + ingest-email
+commands/              /pb-graphiti:ingest-{folder,slack,magento-modules,tickets,email} + /pb-graphiti:wipe-channel
 hooks/                 SessionStart recall + PreCompact consolidation hooks
 scripts/               Python helpers used by the ingest commands and hooks (stdlib only)
 infra/                 docker-compose recipe for the host-side Neo4j + Graphiti stack
@@ -336,6 +336,8 @@ ORDER BY gid, episodes DESC;
 ### Selectively wiping one channel (worked example: GitHub tickets only)
 
 **Use case:** you want to drop all GitHub-ticket episodes from `lcd-mageos` (e.g., to re-ingest with tighter filters) without touching modules, Slack, email, or hook-written facts.
+
+**Easy path: `/pb-graphiti:wipe-channel <channel>`** — wraps everything below safely (dry-run → confirm → MCP delete → optional orphan prune → state-file reminder). Use the manual cypher only if you want to script the wipe or do something the slash command doesn't cover.
 
 **Step 1 — preview what would be deleted.** Always run this first.
 
