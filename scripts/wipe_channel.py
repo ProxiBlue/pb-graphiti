@@ -12,7 +12,10 @@ Channels — each value matches a source_description prefix shape:
 
   github-tickets        https://github.com/...
   email                 mid:<Message-ID>
-  precompact-hook       claude-code-session://...
+  precompact-hook       claude-code-session://... [precompact ...]
+  task-completed-hook   claude-code-session://... [task-completed ...]
+  claude-conversation   claude-code-conversation://... [add_memory ...]
+  claude-self-writes    any of the above three (precompact + task-completed + conversation)
   slack-permalinked     https://<workspace>.slack.com/...
   slack-opaque          slack:<channel>:<date>
   slack                 either Slack variant
@@ -56,7 +59,22 @@ def is_email(src: str) -> bool:
 
 
 def is_precompact_hook(src: str) -> bool:
-    return src.startswith("claude-code-session://")
+    # PreCompact and TaskCompleted both use claude-code-session:// — distinguish
+    # via the bracketed suffix. PreCompact's suffix contains 'precompact'.
+    return src.startswith("claude-code-session://") and "[precompact" in src
+
+
+def is_task_completed_hook(src: str) -> bool:
+    return src.startswith("claude-code-session://") and "[task-completed" in src
+
+
+def is_claude_conversation(src: str) -> bool:
+    return src.startswith("claude-code-conversation://")
+
+
+def is_claude_self_write(src: str) -> bool:
+    """Any Claude-self-write (precompact + task-completed + ad-hoc conversation)."""
+    return src.startswith("claude-code-session://") or src.startswith("claude-code-conversation://")
 
 
 def is_slack_permalink(src: str) -> bool:
@@ -83,6 +101,9 @@ CHANNELS: dict[str, Callable[[str], bool]] = {
     "github-tickets": is_github_ticket,
     "email": is_email,
     "precompact-hook": is_precompact_hook,
+    "task-completed-hook": is_task_completed_hook,
+    "claude-conversation": is_claude_conversation,
+    "claude-self-writes": is_claude_self_write,
     "slack-permalinked": is_slack_permalink,
     "slack-opaque": is_slack_opaque,
     "slack": is_slack,

@@ -24,6 +24,18 @@
           }
         ]
       }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "agent",
+            "prompt": "You are running as a TaskCompleted hook. A task in the user's session just transitioned to status=completed; your job is to extract any worthwhile long-term facts from the work done to complete that task and save them to the shared Graphiti knowledge graph via the `graphiti` MCP. Be concise — this runs non-interactively, no user is at the keyboard, and you only get to look at THIS task's neighborhood, not the whole conversation.\n\n## Step 1 — load the context\n\nThe hook input arrives as JSON in $ARGUMENTS:\n```\n$ARGUMENTS\n```\nParse it. Useful fields you may receive (depending on Claude Code version): `task` (with id, subject, description, activeForm), `transcript_path`, `session_id`, `cwd`.\n\nIf `transcript_path` is available, use Read to load it (JSONL, one message per line) and focus on the recent slice that pertains to THIS task — typically from when the task was set in_progress to now. If transcript is empty / unreadable, fall back to the task metadata alone.\n\n## Step 2 — quick triage\n\nMost completed tasks are trivial: 'list files', 'syntax check', 'run dry-run'. Their completion adds no long-term fact. For those, output exactly `nothing worth saving` and stop — don't call add_memory.\n\nProceed past triage ONLY if the task involved any of: a decision with rationale, a non-obvious project quirk, an incident root cause, a vendor/module verdict, a client preference, a repeatable runbook step, an architectural choice, a deployment sequence constraint, or a 'do this before that' learning.\n\n## Step 3 — resolve group_id (deterministic, no user prompt)\n\nUse bash. First non-empty value wins:\n1. `echo \"$DDEV_PROJECT\"`\n2. `basename \"$(git -C \"<cwd>\" rev-parse --show-toplevel 2>/dev/null)\"`\n3. Literal string `fleet`\n\nOverride to `fleet` for individual facts that are methodology / tool-use / cross-project policy.\n\n## Step 4 — write\n\nCap at 3 episodes per TaskCompleted fire (much lower than PreCompact's 8 because task scope is narrower).\n\nFor each episode, call `add_memory` with ALL of:\n- `group_id`: from Step 3\n- `name`: short noun phrase identifying the entity or concept\n- `episode_body`: the fact + the Why + How-to-apply. Mention the task subject in passing so the provenance is clear.\n- `source`: 'text'\n- `source_description`: format `claude-code-session://<session_id> [task-completed <task-id> <YYYY-MM-DD>]` — provides traceability both to the session AND to the specific task. Get session_id from $ARGUMENTS; task-id likewise; today's date from `date -I -u`.\n- `reference_time`: today's ISO timestamp from `date -Iseconds -u`\n\n## Step 5 — report\n\nOutput ONE line: 'consolidated N episode(s) for task <task-id> to <group_id-list>' or 'nothing worth saving (task <task-id>)'. No other text. Keep the per-task overhead small — most fires should be 'nothing worth saving'.",
+            "timeout": 90,
+            "statusMessage": "Consolidating task to Graphiti..."
+          }
+        ]
+      }
     ]
   }
 }

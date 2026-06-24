@@ -102,9 +102,14 @@ add_memory(
   name="<short title>",
   episode_body="<the fact, with Why + How to apply>",
   source="text",
-  source_description="claude-code session <date>"
+  source_description="claude-code-conversation://<session_id> [add_memory <YYYY-MM-DD>]"
 )
 ```
+
+**Source-description tagging is mandatory for ad-hoc writes.** Use the exact format above:
+- Scheme `claude-code-conversation://` distinguishes ad-hoc in-session writes from PreCompact hook writes (which use `claude-code-session://`) and from bulk ingest (which uses `file://`, `https://github.com/`, `mid:`, etc.).
+- `<session_id>` is the current Claude Code session's id — available as `$CLAUDE_SESSION_ID` in shell context, or via the session metadata. If unavailable, use the literal string `unknown`.
+- The bracketed `[add_memory <date>]` suffix tells operators when and how the fact was written, which is essential for auditing "what has Claude added to the graph this week" — see the README "Auditing automatic writes" section for the cypher query that surfaces these.
 
 Searching from inside a project context (always pass BOTH project + fleet):
 ```
@@ -126,8 +131,13 @@ Every episode written via the bundled ingest scripts carries a `source_descripti
 | Folder ingest (markdown/text/runbook) | `file:///absolute/path/to/file.md` |
 | Slack ingest (with `--workspace-slug`) | `https://<workspace>.slack.com/archives/<channel-id> (<YYYY-MM-DD>)` plus per-message permalinks inline in episode body |
 | Slack ingest (no workspace slug) | `slack:<channel>:<YYYY-MM-DD>` (informational only — not clickable) |
-| PreCompact consolidation | `claude-code-session://<session_id> [precompact <YYYY-MM-DD>]` |
-| Manual `add_memory` | whatever the caller passed |
+| Email ingest | `mid:<Message-ID>` (RFC 2392 URI) |
+| GitHub tickets ingest | `https://github.com/<owner>/<repo>/issues/<n>` (or `/pull/<n>`) |
+| Magento modules ingest | `file:///absolute/path/to/module-dir/` (trailing slash) |
+| **PreCompact consolidation hook** | `claude-code-session://<session_id> [precompact <YYYY-MM-DD>]` |
+| **TaskCompleted consolidation hook** | `claude-code-session://<session_id> [task-completed <task-id> <YYYY-MM-DD>]` |
+| **Ad-hoc Claude `add_memory` in-conversation** | `claude-code-conversation://<session_id> [add_memory <YYYY-MM-DD>]` (per the format above) |
+| Manual user `add_memory` | whatever the caller passed |
 
 **When you recall a fact and act on it, surface the source.** Append the `source_description` in brackets after the claim — same discipline as artefact citation in the investigation protocol.
 

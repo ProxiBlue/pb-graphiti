@@ -150,6 +150,14 @@ Top 8 relevant facts from prior sessions:
 
 **To pin a fact:** call `add_memory(group_id="initial_ingest", name="...", episode_body="...", source_description="...")` via the graphiti MCP from any session. There's no slash-command wrapper yet — write directly.
 
+### TaskCompleted hook — per-task consolidation
+
+Fires every time a TaskUpdate sets a task to `status=completed`. The hook agent reviews the recent task-relevant slice of the transcript and writes any worthwhile facts to Graphiti (capped at 3 episodes per fire — task scope is narrow). Most task completions are trivial ("list files", "syntax check"), so most fires output `nothing worth saving` and exit cheap.
+
+This is the main consolidation trigger on the **1M-context model**, where PreCompact effectively never fires (context fills up much slower than compaction would happen on the regular model). Task completions are the natural milestone signal.
+
+Citation: `source_description = claude-code-session://<session_id> [task-completed <task-id> <YYYY-MM-DD>]` — traceable both to the session AND the specific task that triggered the write.
+
 ### PreCompact hook — automatic consolidation
 
 When the conversation is about to be compacted, the plugin runs an agentic hook that reviews the soon-to-be-lost context and writes any worthwhile facts to Graphiti — without prompting. Scope is auto-resolved by the same rules as SessionStart, overridden to `fleet` for cross-project content (methodology, tool-use, vendor verdicts that apply anywhere).
@@ -599,6 +607,59 @@ The `.pb-graphiti-ingest.json` state file in the cwd where you ran the original 
 - Pass `--reingest` on the next ingest run.
 
 Otherwise you'll wipe the graph, re-run the ingest, and see "nothing to do (all up to date)" — confusing.
+
+### Auditing automatic writes — what has Claude added itself?
+
+Every Claude-driven write to the graph carries a distinguishable `source_description` prefix so you can audit exactly what's been added automatically vs. by bulk ingest:
+
+| Channel | Prefix |
+|---|---|
+| TaskCompleted hook (per-task consolidation) | `claude-code-session://...[task-completed ...]` |
+| PreCompact hook (on compaction) | `claude-code-session://...[precompact ...]` |
+| Ad-hoc Claude `add_memory` mid-conversation | `claude-code-conversation://...` |
+
+To list everything Claude has self-added across all groups:
+
+```cypher
+MATCH (ep:Episodic)
+WHERE ep.source_description STARTS WITH 'claude-code-session://'
+   OR ep.source_description STARTS WITH 'claude-code-conversation://'
+RETURN ep.group_id, ep.name, ep.source_description, ep.created_at
+ORDER BY ep.created_at DESC
+LIMIT 50;
+```
+
+Scoped to one project:
+
+```cypher
+MATCH (ep:Episodic) WHERE ep.group_id = 'lcd-mageos'
+  AND (ep.source_description STARTS WITH 'claude-code-session://'
+       OR ep.source_description STARTS WITH 'claude-code-conversation://')
+RETURN ep.name, ep.source_description, ep.created_at
+ORDER BY ep.created_at DESC;
+```
+
+Just the consolidation hooks (no ad-hoc):
+
+```cypher
+MATCH (ep:Episodic)
+WHERE ep.source_description STARTS WITH 'claude-code-session://'
+RETURN ep.group_id, ep.name, ep.source_description, ep.created_at
+ORDER BY ep.created_at DESC LIMIT 50;
+```
+
+To wipe everything Claude has self-added (auditing the system's auto-writes, then resetting):
+
+```bash
+# Via the slash command (interactive, recommended):
+/pb-graphiti:wipe-channel claude-self-writes
+
+# Or via cypher directly:
+MATCH (ep:Episodic) WHERE ep.group_id = '<your-group>'
+  AND (ep.source_description STARTS WITH 'claude-code-session://'
+       OR ep.source_description STARTS WITH 'claude-code-conversation://')
+DETACH DELETE ep;
+```
 
 ### Exploring the graph — common Neo4j Browser queries
 

@@ -1,6 +1,6 @@
 {
   "name": "pb-graphiti",
-  "version": "0.11.3",
+  "version": "0.12.0",
   "description": "Shared temporal knowledge graph (Graphiti + Neo4j) wired as an MCP server. Gives Claude Code a cross-session, cross-project memory tier separate from per-project file-based auto-memory. Consumer must run the bundled docker-compose stack on the host before the MCP becomes reachable.",
   "userConfig": {
     "graphiti_url": {
