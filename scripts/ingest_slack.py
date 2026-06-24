@@ -195,6 +195,8 @@ def main() -> int:
                     help="Comma-separated keywords — drop days containing any. Default: no filter")
     ap.add_argument("--min-day-messages", type=int, default=3,
                     help="Drop days with fewer than N surviving messages after per-message filters (default 3)")
+    ap.add_argument("--include-code-entities", action="store_true",
+                    help="Allow extraction of file paths / class names as Component entities. Default OFF — code belongs in GitNexus.")
     # --- IO / dedupe ---
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--reingest", action="store_true")
@@ -327,6 +329,33 @@ def main() -> int:
         print(f"ERROR initializing MCP session: {e}", file=sys.stderr)
         return 1
 
+    extract_kwargs: dict = {}
+    if not args.include_code_entities:
+        extract_kwargs["excluded_entity_types"] = ["Component"]
+        extract_kwargs["custom_extraction_instructions"] = (
+            "Extract ALL domain knowledge from this Slack channel-day. Be thorough — "
+            "this graph is the project brain. Capture:\n"
+            "- People: senders, mentioned users, vendor contacts\n"
+            "- Vendors and third-party services\n"
+            "- Business features and product decisions with their rationale\n"
+            "- Root causes of bugs and incidents, and how they were resolved\n"
+            "- Client/customer requirements and preferences\n"
+            "- Deployment procedures, sequencing constraints, and prerequisites "
+            "(e.g. 'module must be disabled before running migration', "
+            "'run X before enabling Y or Z will break')\n"
+            "- Operational runbooks: specific commands, flags, and the order they "
+            "must be run in\n"
+            "- Warnings and 'do this before that' constraints\n"
+            "- Rollback procedures and known failure modes\n"
+            "- Configuration decisions: which config keys, what values, why\n"
+            "- Integration decisions: which systems talk to which, in what order\n"
+            "- Scope decisions: what was explicitly included or excluded and why\n"
+            "DO NOT extract as entities: PHP class names (anything resembling "
+            "Magento\\Foo\\Bar or Vendor\\Module\\Class), file paths, function/method "
+            "names, error messages as standalone entities, or URLs as entities. "
+            "Code-structural detail belongs in GitNexus, not Graphiti."
+        )
+
     written = 0
     failed = 0
     for ep in plan:
@@ -338,6 +367,7 @@ def main() -> int:
                 source="message",
                 source_description=ep["source_description"],
                 reference_time=f"{ep['date']}T00:00:00+00:00",
+                **extract_kwargs,
             )
             seen.add(ep["hash"])
             written += 1

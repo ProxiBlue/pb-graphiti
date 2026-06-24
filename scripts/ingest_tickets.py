@@ -298,15 +298,28 @@ def main() -> int:
     if not args.include_code_entities:
         extract_kwargs["excluded_entity_types"] = ["Component"]
         extract_kwargs["custom_extraction_instructions"] = (
-            "Extract proper-noun concepts: people / authors / contributors, "
-            "vendor names, third-party services, business features, decisions "
-            "with rationale, root causes of incidents, client/customer references. "
+            "Extract ALL domain knowledge from this ticket thread. Be thorough — "
+            "this graph is the project brain. Capture:\n"
+            "- People: authors, contributors, clients, stakeholders\n"
+            "- Vendors and third-party services\n"
+            "- Business features and product decisions with their rationale\n"
+            "- Root causes of bugs and incidents, and how they were resolved\n"
+            "- Client/customer requirements and preferences\n"
+            "- Deployment procedures, sequencing constraints, and prerequisites "
+            "(e.g. 'module must be disabled before running migration', "
+            "'run X before enabling Y or Z will break')\n"
+            "- Operational runbooks: specific commands, flags, and the order they "
+            "must be run in\n"
+            "- Warnings and 'do this before that' constraints\n"
+            "- Rollback procedures and known failure modes\n"
+            "- Configuration decisions: which config keys, what values, why\n"
+            "- Integration decisions: which systems talk to which, in what order\n"
+            "- Scope decisions: what was explicitly included or excluded and why\n"
             "DO NOT extract as entities: PHP class names (anything resembling "
             "Magento\\Foo\\Bar or Vendor\\Module\\Class), file paths "
             "(*.php, *.xml, *.js, paths with slashes), function/method names, "
             "issue numbers as bare identifiers, or Magento core module names "
-            "like 'Magento_Catalog'. Those code-structural references belong "
-            "to the code-graph index (GitNexus), not the domain knowledge graph."
+            "like 'Magento_Catalog'. Those belong in GitNexus, not Graphiti."
         )
 
     written = 0

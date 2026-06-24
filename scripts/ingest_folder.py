@@ -183,6 +183,33 @@ def main() -> int:
         print(f"ERROR initializing MCP session: {e}", file=sys.stderr)
         return 1
 
+    # Folder docs (meeting transcripts, ADRs, runbooks, PRDs) are precisely
+    # where deployment procedures, sequence constraints, and design decisions
+    # live. We do NOT suppress Component entities by default — folder docs
+    # may legitimately treat code references as concepts (e.g., an ADR
+    # explaining why class X was chosen over class Y). The instructions below
+    # steer the extractor toward what's worth capturing.
+    extract_instructions = (
+        "Extract ALL domain knowledge from this document. Be thorough — "
+        "this graph is the project brain. Capture:\n"
+        "- People: authors, contributors, decision-makers, clients\n"
+        "- Vendors and third-party services\n"
+        "- Business features and product decisions with their rationale\n"
+        "- Root causes of bugs and incidents, and how they were resolved\n"
+        "- Client/customer requirements and preferences\n"
+        "- Deployment procedures, sequencing constraints, and prerequisites "
+        "(e.g. 'module must be disabled before running migration', "
+        "'run X before enabling Y or Z will break')\n"
+        "- Operational runbooks: specific commands, flags, and the order they "
+        "must be run in\n"
+        "- Warnings and 'do this before that' constraints\n"
+        "- Rollback procedures and known failure modes\n"
+        "- Configuration decisions: which config keys, what values, why\n"
+        "- Integration decisions: which systems talk to which, in what order\n"
+        "- Scope decisions: what was explicitly included or excluded and why\n"
+        "- Architectural rationale: why this approach was chosen over alternatives"
+    )
+
     written = 0
     failed = 0
     for ep in plan:
@@ -194,6 +221,7 @@ def main() -> int:
                 source="text",
                 source_description=ep["source_description"],
                 reference_time=ep["reference_time"],
+                custom_extraction_instructions=extract_instructions,
             )
             seen.add(ep["hash"])
             written += 1
