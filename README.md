@@ -199,6 +199,8 @@ Use for:
   ```
   Future sessions then recall "we have module X in project Y that does Z" without re-reading the codebase.
 
+**Code-heavy doc trees:** pass `--suppress-code-entities` when ingesting a project's `docs/` tree where the content references many NPM / Composer packages, file paths, class names, or infrastructure components. Without it, the graph fills with low-value Component nodes (express, body-parser, nginx, php-fpm, etc.) that duplicate what GitNexus already indexes. The flag is OFF by default because ADR-style docs may legitimately treat code refs as concepts ("we chose class X over class Y because..."). When ON: NPM/Composer packages, file paths, function/method names, and generic infra refs are dropped — but business vendors with intent (Cliniko, Stripe, Telnyx, etc.) and vendor verdicts stay.
+
 ### `/pb-graphiti:ingest-email <address> --since YYYY-MM-DD`
 
 IMAP-based email ingest. One episode per email thread (grouped by RFC 2822 References/In-Reply-To, falling back to normalized subject). HTML stripped, quoted replies trimmed, attachments noted in headers only.

@@ -48,6 +48,14 @@ python "${CLAUDE_PLUGIN_ROOT}/scripts/ingest_folder.py" \
 
 Report the final summary line (`done: wrote N, failed M`) to the user.
 
+## Code-heavy doc trees: `--suppress-code-entities`
+
+If the user is ingesting a project's `docs/` tree where the content references many NPM packages, Composer packages, infrastructure components, file paths, and class names (typical of Node.js / PHP backend docs), warn them that without suppression the graph fills with low-value Component nodes (express, body-parser, nginx, php-fpm, file paths, etc.) that duplicate what GitNexus already indexes structurally.
+
+Ask: "Is this a code-heavy doc tree where you want code references suppressed? (recommended for Node.js / PHP backend docs; NOT recommended for ADR-style docs that discuss class-X-vs-class-Y decisions)"
+
+If yes, append `--suppress-code-entities` to both the dry-run and the real command. The flag tells the extractor to skip NPM packages, file paths, class names, and generic infra refs — while keeping business vendors (Cliniko, Stripe, Telnyx, etc.) and vendor verdicts intact.
+
 ## Notes
 
 - Default file types ingested: `*.md`, `*.markdown`, `*.txt`, `*.rst`. Override with `--include '*.md,*.org'` etc.

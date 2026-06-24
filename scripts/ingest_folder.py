@@ -122,6 +122,13 @@ def main() -> int:
     ap.add_argument("--target-words", type=int, default=1500, help="Target words per chunk")
     ap.add_argument("--source-prefix", default="", help="Optional prefix prepended to source_description (default: file:// URI of absolute path; with prefix becomes <prefix><file://...>)")
     ap.add_argument("--reference-time", default=None, help="ISO timestamp for all episodes (default: file mtime)")
+    ap.add_argument("--suppress-code-entities", action="store_true",
+                    help="Tell Graphiti NOT to extract NPM packages, file paths, infrastructure components, "
+                         "and other code-structural refs as entities. Opt-in (default OFF) because ADRs / "
+                         "architecture docs may legitimately treat code refs as concepts. Turn ON when "
+                         "ingesting code-heavy doc trees (e.g. a Node.js project's docs/) where you'd "
+                         "otherwise drown the graph in 'express', 'body-parser', 'nginx' nodes that "
+                         "duplicate what GitNexus already indexes structurally.")
     ap.add_argument("--dry-run", action="store_true", help="Plan only, do not write")
     ap.add_argument("--reingest", action="store_true", help="Ignore dedupe state, re-write everything")
     ap.add_argument("--state-file", default=STATE_FILE, help=f"Dedupe state file (default: {STATE_FILE} in CWD)")
@@ -185,10 +192,11 @@ def main() -> int:
 
     # Folder docs (meeting transcripts, ADRs, runbooks, PRDs) are precisely
     # where deployment procedures, sequence constraints, and design decisions
-    # live. We do NOT suppress Component entities by default — folder docs
-    # may legitimately treat code references as concepts (e.g., an ADR
-    # explaining why class X was chosen over class Y). The instructions below
-    # steer the extractor toward what's worth capturing.
+    # live. By default we do NOT suppress Component entities because folder
+    # docs may legitimately treat code references as concepts (e.g., an ADR
+    # explaining why class X was chosen over class Y). For code-heavy doc
+    # trees where Component extraction creates noise (e.g. a Node.js
+    # project's docs/), opt in via --suppress-code-entities.
     extract_instructions = (
         "Extract ALL domain knowledge from this document. Be thorough — "
         "this graph is the project brain. Capture:\n"
@@ -210,6 +218,30 @@ def main() -> int:
         "- Architectural rationale: why this approach was chosen over alternatives"
     )
 
+    extract_kwargs: dict = {"custom_extraction_instructions": extract_instructions}
+    if args.suppress_code_entities:
+        extract_kwargs["excluded_entity_types"] = ["Component"]
+        extract_kwargs["custom_extraction_instructions"] = extract_instructions + (
+            "\n\nDO NOT extract as entities any of the following — they belong "
+            "in a code-graph index (GitNexus), not in the domain knowledge graph:\n"
+            "- NPM / Composer / pip package names (express, body-parser, lodash, "
+            "  axios, react, debug, dotenv, etc.)\n"
+            "- Generic infrastructure runtime references (Node.js, php-fpm, nginx, "
+            "  Apache, systemd, Docker, etc.) UNLESS the document is making a "
+            "  business decision ABOUT one of them\n"
+            "- File paths (anything ending in .js, .ts, .php, .py, .json, .xml; "
+            "  anything containing slashes that looks like a relative path)\n"
+            "- Class names / function names / method names\n"
+            "- Environment variable names treated as standalone entities (DEBUG, "
+            "  NODE_ENV, PATH, etc.)\n"
+            "- Generic HTTP status codes, error messages, or shell commands\n\n"
+            "DO still extract: the project's KEY business vendors (e.g. Cliniko, "
+            "Stripe, Telnyx, Retell AI), client/customer references, vendor "
+            "VERDICTS (e.g. 'we chose Honeycomb over Datadog because...'). "
+            "The distinction is intent vs. mechanism — a tool used incidentally "
+            "is noise; a tool with a decision attached is signal."
+        )
+
     written = 0
     failed = 0
     for ep in plan:
@@ -221,7 +253,7 @@ def main() -> int:
                 source="text",
                 source_description=ep["source_description"],
                 reference_time=ep["reference_time"],
-                custom_extraction_instructions=extract_instructions,
+                **extract_kwargs,
             )
             seen.add(ep["hash"])
             written += 1
