@@ -234,6 +234,26 @@ Both filters AND together (a thread must pass both gates if both are set). Combi
 
 Pass `--require-relevance` to **refuse to run** unless an address allowlist or keyword list is set. Prevents the foot-gun of accidentally ingesting an entire mailbox with no scope. Strongly recommended for first-time runs against a new mailbox.
 
+#### Noise filtering (bounce / monitor / auto)
+
+Email ingest ships with a default noise filter that drops messages from auto-systems BEFORE any LLM cost: mailer-daemons, UptimeRobot, GitHub notifications, no-reply senders, undeliverable bounces, OOO autoresponders, calendar invites. Override via:
+
+- `--exclude-from 'pattern1,pattern2'` — additive to defaults; case-insensitive substring on From header
+- `--exclude-subjects 'pattern1,pattern2'` — additive to defaults; case-insensitive substring on Subject
+- `--no-default-noise-filter` — disable defaults (rare; "give me literally everything")
+- `--exclude-list-file <path>` — load patterns from a line-oriented file (additive to defaults + CLI flags)
+
+**Smart noise scan during dry-run:** `--dry-run` runs a deterministic pattern scan over the surviving messages and writes editable suggestions to `<state-dir>/suggested-excludes-<group>.txt`. It detects:
+
+- Sender username patterns: `noreply`, `no-reply`, `donotreply`, `bounce`, `mailer-daemon`, `notifications`, etc.
+- Sender domain patterns: `@uptimerobot.com`, `notifications.*`, `bounces.*`, etc.
+- Known automated services (flagged for review, NOT auto-suggested): Sentry, Sendgrid, GitHub, Asana, CircleCI, etc. — these often carry useful business signal (Stripe billing, Atlassian tickets) so user judgement applies
+- Header-based signals: `Auto-Submitted`, `Precedence: bulk/list`, `List-Id`, `Return-Path: <>` (true bounce)
+- Subject suspect keywords: `digest`, `weekly summary`, `build #`, `delivery status`, `password reset`, etc.
+- Repeating subject prefix clusters (3+ messages with same normalized subject)
+
+Workflow: dry-run → review file → comment out false positives → re-run dry-run with `--exclude-list-file` to confirm → live ingest with the same file. Cost saving on big mailboxes: filtering 30-50% noise before LLM can save **$10-25 in Haiku** per ingest.
+
 #### Other filters
 
 `--since YYYY-MM-DD` is a server-side IMAP filter; `--min-words` to drop auto-replies (default 10); `--min-thread-messages` to drop one-offs. Code-entity suppression on by default (same rationale as tickets).

@@ -86,7 +86,18 @@ The script splits the `[--since, today]` range into windows and uses a fresh IMA
 
 If the script reports a "batch ... failed" warning with a socket error, halve `--batch-days` and re-run. The dedupe state file means already-ingested threads from successful batches will be skipped.
 
-Show: thread count, group_id, first ~15 entries with sizes. The script reports how many messages were dropped by the address gate vs. the keyword gate vs. the min-words/min-thread filters — relay that summary so the user can see whether the filters are too loose or too tight. Heads-up the cost — each thread = one Anthropic Haiku call. 100 threads ≈ $0.50-1.50.
+Show: thread count, group_id, first ~15 entries with sizes. The script reports how many messages were dropped by the address gate vs. the keyword gate vs. the noise gate vs. the min-words/min-thread filters — relay that summary so the user can see whether the filters are too loose or too tight.
+
+**Important — read the noise-scan output.** After the plan, the dry-run runs a deterministic noise pattern scanner (no LLM cost) over the surviving messages, looking for patterns NOT already in the active filter. It prints a structured suggestions section AND writes them to `<state-dir>/suggested-excludes-<group>.txt`. Relay the inline summary to the user. If suggestions exist:
+
+1. Open the suggestions file, review each entry's count + example
+2. Comment out (`#`) any entries that are FALSE POSITIVES (a real domain you DO want, a subject pattern that's only superficially noise-like)
+3. Re-run the dry-run with `--exclude-list-file <path>` to confirm the additions land correctly
+4. When happy, run the live ingest with the same `--exclude-list-file` flag
+
+This catches the long-tail noise that the built-in defaults miss (Sentry notifications, GitHub PR digests, Stripe billing alerts, custom autoresponder formats per provider). Cost reality: a full mailbox ingest of 5,000 messages can have 30-50% noise; filtering it out before LLM extraction can save **$10-25 in Haiku** per ingest.
+
+Heads-up the cost — each surviving thread = one Anthropic Haiku call. 100 threads ≈ $0.50-1.50.
 
 If the count is huge:
 - Tighten `--addresses` — narrow domain matches to specific people

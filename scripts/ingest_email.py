@@ -328,6 +328,282 @@ def passes_noise_gate(
     return True
 
 
+# === Deterministic noise pattern detection (used during --dry-run) ===
+# Goal: find candidate exclusion patterns the user can review BEFORE the
+# live ingest, without paying any LLM cost. All rules below are pure
+# string/header inspection — no Anthropic or Voyage calls.
+
+# Username localpart fragments that strongly suggest auto-system senders.
+NOISE_LOCALPART_FRAGMENTS = {
+    "noreply", "no-reply", "no_reply", "donotreply", "do-not-reply",
+    "do_not_reply", "mailer-daemon", "postmaster", "bounce", "bounces",
+    "notifications", "notification", "alerts", "alert", "monitor",
+    "system", "robot", "auto-", "automatic", "delivery",
+}
+# Domain fragments that strongly suggest auto-system senders.
+NOISE_DOMAIN_FRAGMENTS = {
+    "uptimerobot", "bounces.", "notifications.", "alerts.",
+    "no-reply.", "noreply.", "do-not-reply.", "donotreply.",
+    "system.", "automated.", "auto-", "monitor.",
+}
+# Well-known automated services — flag for REVIEW (not auto-suggest).
+# These often have legitimate business signal (e.g., Stripe payment alerts).
+KNOWN_AUTOMATED_DOMAINS = {
+    "sentry.io", "sendgrid.net", "mailgun.org", "postmarkapp.com",
+    "mandrillapp.com", "atlassian.net", "github.com", "gitlab.com",
+    "slack.com", "asana.com", "trello.com", "circleci.com",
+    "travis-ci.com", "netlify.com", "vercel.com", "datadoghq.com",
+    "newrelic.com", "pagerduty.com", "opsgenie.com", "discordapp.com",
+}
+# Subject-line keyword patterns suggesting auto / digest / bulk content.
+SUSPECT_SUBJECT_KEYWORDS = {
+    "digest", "weekly summary", "daily summary", "daily report",
+    "weekly report", "build #", "build failed", "build succeeded",
+    "ci pipeline", "pipeline failed", "pipeline passed",
+    "delivery status", "undeliverable", "automatic reply",
+    "out of office", "auto-reply", "calendar invite", "meeting invitation",
+    "appointment:", "subscription expires", "subscription renewed",
+    "your receipt", "receipt for", "payment receipt", "invoice attached",
+    "password reset", "reset your password", "verify your email",
+    "security alert", "sign-in", "new sign-in",
+}
+
+
+def _split_addr(from_header: str) -> tuple[str, str, str]:
+    """Return (full-addr, localpart, domain) lowercased. Empty strings on failure."""
+    if not from_header:
+        return "", "", ""
+    try:
+        addrs = email.utils.getaddresses([from_header])
+    except (TypeError, ValueError):
+        return "", "", ""
+    if not addrs or not addrs[0][1]:
+        return "", "", ""
+    full = addrs[0][1].lower()
+    if "@" not in full:
+        return full, full, ""
+    local, _, domain = full.partition("@")
+    return full, local, domain
+
+
+def _normalize_subject_for_clustering(subj: str) -> str:
+    """Strip Re:/Fwd:/etc. and trim — keeps first ~80 chars for grouping."""
+    if not subj:
+        return ""
+    s = subj
+    while True:
+        m = re.match(r"^(re|fwd|fw|aw|sv|odp|tr|wg)\s*:\s*", s, re.IGNORECASE)
+        if not m:
+            break
+        s = s[m.end():]
+    return s.strip()[:80]
+
+
+def detect_noise_patterns(
+    messages: list[email.message.Message],
+    *,
+    already_excluded_from: set[str],
+    already_excluded_subjects: set[str],
+    cluster_threshold: int = 3,
+) -> dict:
+    """Walk messages, classify suspects by detection rule. Return suggestions.
+
+    Returns a dict:
+        {
+            "from_addresses":    [(addr, count, example_subject), ...],
+            "from_domains":      [(domain, count, example_subject), ...],
+            "known_services":    [(domain, count, example_subject), ...],
+            "header_noise":      [(label, count, example), ...],
+            "subject_clusters":  [(prefix, count, example_full_subject), ...],
+            "suspect_subjects":  [(keyword, count, example_subject), ...],
+        }
+
+    Patterns already covered by `already_excluded_*` are filtered out so
+    suggestions only ever ADD to the user's current configuration.
+    """
+    from_addresses: dict[str, dict] = defaultdict(lambda: {"count": 0, "example": ""})
+    from_domains: dict[str, dict] = defaultdict(lambda: {"count": 0, "example": ""})
+    known_services: dict[str, dict] = defaultdict(lambda: {"count": 0, "example": ""})
+    header_noise: dict[str, dict] = defaultdict(lambda: {"count": 0, "example": ""})
+    subject_clusters: dict[str, dict] = defaultdict(lambda: {"count": 0, "example": ""})
+    suspect_subjects: dict[str, dict] = defaultdict(lambda: {"count": 0, "example": ""})
+
+    for msg in messages:
+        from_h = decode_header_value(msg.get("From"))
+        subj_h = decode_header_value(msg.get("Subject"))
+        full, local, domain = _split_addr(from_h)
+
+        # Skip messages already caught by current filter
+        from_lower = (from_h or "").lower()
+        subj_lower = (subj_h or "").lower()
+        if any(p in from_lower for p in already_excluded_from):
+            continue
+        if any(p in subj_lower for p in already_excluded_subjects):
+            continue
+
+        # 1. Sender localpart noise patterns
+        if local and any(frag in local for frag in NOISE_LOCALPART_FRAGMENTS):
+            from_addresses[full]["count"] += 1
+            if not from_addresses[full]["example"]:
+                from_addresses[full]["example"] = subj_h or "(no subject)"
+
+        # 2. Sender domain noise patterns
+        if domain and any(frag in domain for frag in NOISE_DOMAIN_FRAGMENTS):
+            key = "@" + domain
+            from_domains[key]["count"] += 1
+            if not from_domains[key]["example"]:
+                from_domains[key]["example"] = subj_h or "(no subject)"
+
+        # 3. Known automated services (flag, don't auto-suggest)
+        if domain in KNOWN_AUTOMATED_DOMAINS:
+            key = "@" + domain
+            known_services[key]["count"] += 1
+            if not known_services[key]["example"]:
+                known_services[key]["example"] = subj_h or "(no subject)"
+
+        # 4. Header-based noise signals
+        auto_sub = (msg.get("Auto-Submitted") or "").strip().lower()
+        if auto_sub and auto_sub != "no":
+            header_noise["Auto-Submitted (auto-generated/replied)"]["count"] += 1
+            if not header_noise["Auto-Submitted (auto-generated/replied)"]["example"]:
+                header_noise["Auto-Submitted (auto-generated/replied)"]["example"] = f"From: {from_h} / {subj_h}"
+        prec = (msg.get("Precedence") or "").strip().lower()
+        if prec in {"bulk", "list", "junk"}:
+            header_noise[f"Precedence: {prec}"]["count"] += 1
+            if not header_noise[f"Precedence: {prec}"]["example"]:
+                header_noise[f"Precedence: {prec}"]["example"] = f"From: {from_h} / {subj_h}"
+        if msg.get("List-Id"):
+            header_noise["List-Id present (mailing list)"]["count"] += 1
+            if not header_noise["List-Id present (mailing list)"]["example"]:
+                header_noise["List-Id present (mailing list)"]["example"] = f"List: {msg.get('List-Id')}"
+        return_path = (msg.get("Return-Path") or "").strip()
+        if return_path in {"<>", ""}:
+            # Only flag if it's actually empty <> (true bounce). Empty string
+            # is just missing header — common, not a signal on its own.
+            if return_path == "<>":
+                header_noise["Return-Path: <> (bounce)"]["count"] += 1
+                if not header_noise["Return-Path: <> (bounce)"]["example"]:
+                    header_noise["Return-Path: <> (bounce)"]["example"] = f"From: {from_h} / {subj_h}"
+
+        # 5. Subject suspect-keyword detection
+        for kw in SUSPECT_SUBJECT_KEYWORDS:
+            if kw in subj_lower:
+                suspect_subjects[kw]["count"] += 1
+                if not suspect_subjects[kw]["example"]:
+                    suspect_subjects[kw]["example"] = subj_h or "(no subject)"
+                break  # one keyword per message — don't double-count
+
+        # 6. Subject prefix clustering (find repeating subject patterns)
+        cluster_key = _normalize_subject_for_clustering(subj_h)
+        if cluster_key:
+            subject_clusters[cluster_key]["count"] += 1
+            if not subject_clusters[cluster_key]["example"]:
+                subject_clusters[cluster_key]["example"] = subj_h or "(no subject)"
+
+    def _top(d: dict, min_count: int = 1) -> list[tuple[str, int, str]]:
+        return sorted(
+            [(k, v["count"], v["example"]) for k, v in d.items() if v["count"] >= min_count],
+            key=lambda x: -x[1],
+        )
+
+    return {
+        "from_addresses": _top(from_addresses),
+        "from_domains": _top(from_domains),
+        "known_services": _top(known_services),
+        "header_noise": _top(header_noise),
+        # Subject clusters need >= cluster_threshold to be worth suggesting
+        "subject_clusters": _top(subject_clusters, min_count=cluster_threshold),
+        "suspect_subjects": _top(suspect_subjects),
+    }
+
+
+def write_suggestions_file(path: Path, suggestions: dict, group_id: str) -> None:
+    """Emit a simple line-oriented exclude-list file the user can edit.
+
+    Format:
+      from <pattern>       # comment
+      subject <pattern>    # comment
+      # lines starting with # are comments
+    """
+    lines: list[str] = [
+        f"# pb-graphiti suggested exclude list for group_id={group_id!r}",
+        f"# Generated {datetime.datetime.now(datetime.timezone.utc).isoformat()}",
+        "# ",
+        "# Edit this file: remove patterns you DO want ingested, add patterns",
+        "# you've spotted manually. Then pass to live ingest via:",
+        "#   --exclude-list-file " + str(path),
+        "# ",
+        "# Lines: 'from <pattern>' adds to --exclude-from; 'subject <pattern>'",
+        "# adds to --exclude-subjects. '#' = comment. Patterns are substring,",
+        "# case-insensitive. Defaults from DEFAULT_EXCLUDE_FROM/SUBJECTS still",
+        "# apply on top of this file.",
+        "",
+    ]
+
+    def _section(title: str, items: list[tuple[str, int, str]], kind: str) -> None:
+        if not items:
+            return
+        lines.append(f"# === {title} ===")
+        for pattern, count, example in items:
+            ex = (example[:60] + "…") if len(example) > 60 else example
+            lines.append(f"{kind} {pattern}  # {count} message(s) — e.g. {ex!r}")
+        lines.append("")
+
+    _section("Sender ADDRESSES with noise-indicating localparts",
+             suggestions.get("from_addresses", []), "from")
+    _section("Sender DOMAINS with noise-indicating patterns",
+             suggestions.get("from_domains", []), "from")
+    _section("Known automated-service domains (REVIEW — may carry useful signal like billing)",
+             suggestions.get("known_services", []), "from")
+    _section("Subject-line keyword matches (auto / digest / bounce)",
+             suggestions.get("suspect_subjects", []), "subject")
+    _section("Repeating subject prefixes (clustered)",
+             suggestions.get("subject_clusters", []), "subject")
+
+    header_noise = suggestions.get("header_noise", [])
+    if header_noise:
+        lines.append("# === Header-based noise indicators (informational only) ===")
+        lines.append("# These messages had headers like Auto-Submitted, Precedence: bulk,")
+        lines.append("# List-Id, or Return-Path: <>. Consider whether the senders / subjects")
+        lines.append("# above already cover them; if not, add explicit patterns from the")
+        lines.append("# example lines below.")
+        for label, count, example in header_noise:
+            lines.append(f"# {label}: {count} message(s) — e.g. {example}")
+        lines.append("")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def load_exclude_list_file(path: Path) -> tuple[set[str], set[str]]:
+    """Read line-oriented exclude file. Returns (from_patterns, subject_patterns).
+
+    Format mirrors write_suggestions_file output:
+      from <pattern>   # comment
+      subject <pattern># comment
+      # full-line comment
+    """
+    from_patterns: set[str] = set()
+    subject_patterns: set[str] = set()
+    if not path.is_file():
+        return from_patterns, subject_patterns
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.split("#", 1)[0].strip()  # strip inline comment
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        kind, pattern = parts[0].lower(), parts[1].strip().lower()
+        if not pattern:
+            continue
+        if kind == "from":
+            from_patterns.add(pattern)
+        elif kind == "subject":
+            subject_patterns.add(pattern)
+    return from_patterns, subject_patterns
+
+
 def fetch_uids(M: imaplib.IMAP4, search_terms: list[str]) -> list[str]:
     typ, data = M.uid("search", None, *search_terms)
     if typ != "OK" or not data or not data[0]:
@@ -497,6 +773,11 @@ def main() -> int:
                     help="Disable the built-in From/Subject noise filter (bounce daemons, uptime monitors, "
                          "OOO autoresponders, calendar invites). Default OFF — defaults ARE applied. Turn ON "
                          "if you need EVERY message including auto-notifications (rare).")
+    ap.add_argument("--exclude-list-file", default=None,
+                    help="Path to a line-oriented exclude file (format: 'from <pattern>' / 'subject <pattern>' / "
+                         "'#comment'). Patterns ADD to --exclude-from / --exclude-subjects + defaults. The dry-run "
+                         "writes a suggested file to <state-dir>/suggested-excludes-<group>.txt for you to review "
+                         "and edit before live ingest.")
     # Batching (for large mailboxes — Zoho/Gmail close sockets on long fetches)
     ap.add_argument("--batch-days", type=int, default=30,
                     help="Split [--since, today] into N-day windows; each window uses its own IMAP session. "
@@ -557,6 +838,14 @@ def main() -> int:
         noise_subjects = set(DEFAULT_EXCLUDE_SUBJECTS)
     noise_from |= {p.strip().lower() for p in args.exclude_from.split(",") if p.strip()}
     noise_subjects |= {p.strip().lower() for p in args.exclude_subjects.split(",") if p.strip()}
+    # Load patterns from file if provided
+    if args.exclude_list_file:
+        file_from, file_subjects = load_exclude_list_file(Path(args.exclude_list_file).expanduser())
+        if file_from or file_subjects:
+            print(f"loaded {len(file_from)} from / {len(file_subjects)} subject pattern(s) from "
+                  f"{args.exclude_list_file}", file=sys.stderr)
+        noise_from |= file_from
+        noise_subjects |= file_subjects
 
     fetch_kwargs = dict(
         imap_host=args.imap_host,
@@ -674,6 +963,53 @@ def main() -> int:
             print(f"  - {ep['name']} ({len(ep['body'])} chars)")
         if len(plan) > 15:
             print(f"  ... +{len(plan) - 15} more")
+
+        # === Noise pattern scan (deterministic, no LLM) ===
+        # Collect ALL surviving messages (post address+noise gate) and look
+        # for patterns NOT already in the active filter. Surfaces additional
+        # exclude candidates the user can review + edit before live ingest.
+        all_msgs = [m for thread_msgs in threads.values() for _uid, m in thread_msgs]
+        print(f"\nscanning {len(all_msgs)} surviving message(s) for additional noise patterns...", file=sys.stderr)
+        suggestions = detect_noise_patterns(
+            all_msgs,
+            already_excluded_from=noise_from,
+            already_excluded_subjects=noise_subjects,
+        )
+
+        suggestions_path = state_path.parent / f"suggested-excludes-{args.group_id}.txt"
+        write_suggestions_file(suggestions_path, suggestions, args.group_id)
+
+        # Inline summary
+        total_suggested = sum(
+            len(suggestions.get(k, [])) for k in
+            ("from_addresses", "from_domains", "known_services", "subject_clusters", "suspect_subjects")
+        )
+        if total_suggested == 0 and not suggestions.get("header_noise"):
+            print("\nNoise scan: no additional patterns found beyond the current filter.")
+        else:
+            print(f"\nNoise scan — {total_suggested} pattern(s) detected NOT in current filter:")
+            for label, key in [
+                ("Sender addresses", "from_addresses"),
+                ("Sender domains", "from_domains"),
+                ("Known automated services (review carefully — may have signal)", "known_services"),
+                ("Subject keywords", "suspect_subjects"),
+                ("Repeating subject prefixes", "subject_clusters"),
+            ]:
+                items = suggestions.get(key, [])[:5]
+                if items:
+                    print(f"\n  {label}:")
+                    for pattern, count, example in items:
+                        ex_short = (example[:60] + "…") if len(example) > 60 else example
+                        print(f"    {pattern}  ({count}×, e.g. {ex_short!r})")
+            header_noise = suggestions.get("header_noise", [])[:3]
+            if header_noise:
+                print("\n  Header indicators (informational):")
+                for label, count, _ex in header_noise:
+                    print(f"    {label}: {count} msg(s)")
+
+            print(f"\nSuggestions written to: {suggestions_path}")
+            print(f"Review + edit that file, then pass to the live run:")
+            print(f"  --exclude-list-file {suggestions_path}")
         return 0
     if not plan:
         print("nothing to do (all up to date)")
