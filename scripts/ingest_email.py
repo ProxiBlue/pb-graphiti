@@ -273,6 +273,61 @@ def passes_keyword_gate(text: str, include: set[str] | None, exclude: set[str] |
     return True
 
 
+# Built-in noise patterns — bounce daemons, uptime monitors, autoresponders,
+# CI/SCM bots, calendar systems. These produce high-volume low-signal episodes
+# that just pollute recall and burn Haiku credits. Override via
+# --no-default-noise-filter for "give me literally everything."
+DEFAULT_EXCLUDE_FROM = {
+    "mailer-daemon",
+    "postmaster@",
+    "noreply@uptimerobot.com",
+    "@uptimerobot.com",
+    "@bounces.",
+    "noreply@github.com",
+    "notifications@github.com",
+    "no-reply@",
+    "noreply@",
+    "donotreply@",
+    "do-not-reply@",
+    "@bounce.",
+    "@notifications.",
+}
+DEFAULT_EXCLUDE_SUBJECTS = {
+    "monitor is down",
+    "monitor is up",
+    "undeliverable:",
+    "delivery status notification",
+    "delivery failure",
+    "auto-submitted",
+    "out of office",
+    "automatic reply",
+    "automatic response",
+    "vacation autoreply",
+    "calendar invite",
+    "meeting invitation",
+    "appointment:",
+}
+
+
+def passes_noise_gate(
+    from_header: str,
+    subject: str,
+    *,
+    from_patterns: set[str],
+    subject_patterns: set[str],
+) -> bool:
+    """Drop messages from auto-systems before any extraction cost."""
+    from_lower = (from_header or "").lower()
+    for p in from_patterns:
+        if p in from_lower:
+            return False
+    subj_lower = (subject or "").lower()
+    for p in subject_patterns:
+        if p in subj_lower:
+            return False
+    return True
+
+
 def fetch_uids(M: imaplib.IMAP4, search_terms: list[str]) -> list[str]:
     typ, data = M.uid("search", None, *search_terms)
     if typ != "OK" or not data or not data[0]:
@@ -313,12 +368,15 @@ def fetch_batch(
     imap_password: str,
     folder: str,
     allowed_addrs: set[str] | None,
+    noise_from: set[str] | None = None,
+    noise_subjects: set[str] | None = None,
     log_prefix: str = "",
-) -> tuple[dict[str, list[tuple[str, email.message.Message]]], dict[str, str], int]:
+) -> tuple[dict[str, list[tuple[str, email.message.Message]]], dict[str, str], int, int]:
     """Open a fresh IMAP session, fetch all messages in [chunk_start, chunk_end),
-    apply the address gate, group by thread key.
+    apply the address gate AND the noise gate (bounce/monitor/autoresponder),
+    group by thread key.
 
-    Returns (threads, thread_root_id_map, dropped_address_count).
+    Returns (threads, thread_root_id_map, dropped_address, dropped_noise).
 
     Raises on connection / login failure so the caller can retry or surface.
     """
@@ -336,10 +394,23 @@ def fetch_batch(
         threads: dict[str, list[tuple[str, email.message.Message]]] = defaultdict(list)
         thread_root_id: dict[str, str] = {}
         dropped_address = 0
+        dropped_noise = 0
         for uid in uids:
             msg = fetch_message(M, uid)
             if msg is None:
                 continue
+            # Noise gate first — cheaper to check than the address gate
+            # (which has to parse all the address headers). Drops bounce
+            # daemons, uptime monitors, autoresponders BEFORE LLM cost
+            # downstream.
+            if noise_from or noise_subjects:
+                from_h = decode_header_value(msg.get("From"))
+                subj_h = decode_header_value(msg.get("Subject"))
+                if not passes_noise_gate(from_h, subj_h,
+                                          from_patterns=noise_from or set(),
+                                          subject_patterns=noise_subjects or set()):
+                    dropped_noise += 1
+                    continue
             if allowed_addrs is not None:
                 participants = message_participants(msg)
                 if not passes_address_gate(participants, allowed_addrs):
@@ -357,7 +428,7 @@ def fetch_batch(
             threads[thread_key].append((uid, msg))
             if thread_key not in thread_root_id and msg_id:
                 thread_root_id[thread_key] = msg_id
-        return dict(threads), thread_root_id, dropped_address
+        return dict(threads), thread_root_id, dropped_address, dropped_noise
     finally:
         try:
             M.close()
@@ -414,6 +485,18 @@ def main() -> int:
                     help="Drop threads with fewer than N surviving messages (default 1)")
     ap.add_argument("--include-code-entities", action="store_true",
                     help="Allow extraction of file paths / class names. Default OFF — code belongs in GitNexus.")
+    # Noise filters — drop bounce / monitor / autoresponder messages BEFORE LLM cost
+    ap.add_argument("--exclude-from", default="",
+                    help="Comma-separated From-header patterns (substrings, case-insensitive) — drop messages "
+                         "whose From matches any. Added on top of the default noise list (see "
+                         "--no-default-noise-filter to disable defaults).")
+    ap.add_argument("--exclude-subjects", default="",
+                    help="Comma-separated Subject patterns (substrings, case-insensitive) — drop messages "
+                         "whose Subject matches any. Added on top of the default noise list.")
+    ap.add_argument("--no-default-noise-filter", action="store_true",
+                    help="Disable the built-in From/Subject noise filter (bounce daemons, uptime monitors, "
+                         "OOO autoresponders, calendar invites). Default OFF — defaults ARE applied. Turn ON "
+                         "if you need EVERY message including auto-notifications (rare).")
     # Batching (for large mailboxes — Zoho/Gmail close sockets on long fetches)
     ap.add_argument("--batch-days", type=int, default=30,
                     help="Split [--since, today] into N-day windows; each window uses its own IMAP session. "
@@ -463,6 +546,17 @@ def main() -> int:
     threads: dict[str, list[tuple[str, email.message.Message]]] = defaultdict(list)
     thread_root_id: dict[str, str] = {}
     dropped_address = 0
+    dropped_noise = 0
+
+    # Compose noise filter sets — defaults + user overrides (unless --no-default-noise-filter)
+    if args.no_default_noise_filter:
+        noise_from: set[str] = set()
+        noise_subjects: set[str] = set()
+    else:
+        noise_from = set(DEFAULT_EXCLUDE_FROM)
+        noise_subjects = set(DEFAULT_EXCLUDE_SUBJECTS)
+    noise_from |= {p.strip().lower() for p in args.exclude_from.split(",") if p.strip()}
+    noise_subjects |= {p.strip().lower() for p in args.exclude_subjects.split(",") if p.strip()}
 
     fetch_kwargs = dict(
         imap_host=args.imap_host,
@@ -471,16 +565,19 @@ def main() -> int:
         imap_password=password,
         folder=args.folder,
         allowed_addrs=allowed_addrs,
+        noise_from=noise_from or None,
+        noise_subjects=noise_subjects or None,
     )
 
     def merge(batch_result):
-        nonlocal dropped_address
-        b_threads, b_root_id, b_dropped = batch_result
+        nonlocal dropped_address, dropped_noise
+        b_threads, b_root_id, b_dropped_addr, b_dropped_noise = batch_result
         for k, msgs in b_threads.items():
             threads[k].extend(msgs)
             if k not in thread_root_id and k in b_root_id:
                 thread_root_id[k] = b_root_id[k]
-        dropped_address += b_dropped
+        dropped_address += b_dropped_addr
+        dropped_noise += b_dropped_noise
 
     try:
         if args.parallel_workers <= 1:
@@ -502,9 +599,13 @@ def main() -> int:
         print(f"ERROR: IMAP failure: {e}", file=sys.stderr)
         return 1
 
-    print(f"  grouped into {len(threads)} thread(s)" +
-          (f"  ({dropped_address} message(s) dropped by --addresses gate)" if dropped_address else ""),
-          file=sys.stderr)
+    drop_notes = []
+    if dropped_noise:
+        drop_notes.append(f"{dropped_noise} dropped as noise (bounce/monitor/auto)")
+    if dropped_address:
+        drop_notes.append(f"{dropped_address} dropped by --addresses gate")
+    drop_str = f"  ({'; '.join(drop_notes)})" if drop_notes else ""
+    print(f"  grouped into {len(threads)} thread(s){drop_str}", file=sys.stderr)
 
     plan: list[dict] = []
     dropped_keyword = 0
