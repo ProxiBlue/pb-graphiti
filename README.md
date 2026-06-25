@@ -176,13 +176,31 @@ This is the main consolidation trigger on the **1M-context model**, where PreCom
 
 Citation: `source_description = claude-code-session://<session_id> [task-completed <task-id> <YYYY-MM-DD>]` — traceable both to the session AND the specific task that triggered the write.
 
-### PreCompact hook — automatic consolidation
+### PreCompact hook — automatic consolidation (pre-1M models)
 
-When the conversation is about to be compacted, the plugin runs an agentic hook that reviews the soon-to-be-lost context and writes any worthwhile facts to Graphiti — without prompting. Scope is auto-resolved by the same rules as SessionStart, overridden to `fleet` for cross-project content (methodology, tool-use, vendor verdicts that apply anywhere).
+When the conversation is about to be compacted, the plugin runs an agentic hook that reviews the soon-to-be-lost context and writes any worthwhile facts to Graphiti — without prompting. Scope is auto-resolved by the same rules as SessionStart, defaulting to `host` when no project context is present.
 
 Facts the hook writes: decisions with rationale, project quirks, incident root causes, vendor verdicts, client preferences, runbook steps. Facts it skips: ephemeral session state, in-progress task lists, anything obtainable from `git log` / `git blame`, restatements of CLAUDE.md.
 
-The hook's auto-write bypasses the [graphiti-usage skill's Hard Rule 1](skills/graphiti-usage/SKILL.md) (which requires user confirmation before any add_memory call). The rule still applies to add_memory calls Claude makes mid-conversation; it only carves out for the non-interactive PreCompact hook.
+**On 1M-context models, PreCompact effectively never fires** (sessions don't hit the compaction threshold). The `SessionEnd` hook below is the practical replacement for that case.
+
+### SessionEnd hook — catch-all consolidation on session terminate
+
+Mirrors PreCompact's behaviour but fires when the session closes regardless of whether compaction happened. This is the primary write path for sessions on 1M-context models where PreCompact stays dormant. Same 8-episode cap, same triage criteria. Citation: `claude-code-session://<session_id> [session-end <YYYY-MM-DD>]`.
+
+If a session does hit compaction AND then terminates, both PreCompact and SessionEnd may fire — the SessionEnd handler is instructed to skip facts already consolidated by an earlier PreCompact in the same session to avoid duplicates.
+
+### SubagentStop hook — per-subagent decision capture
+
+Fires every time a `Task` tool subagent returns to its parent session. Captures decisions made by gitnexus-reviewer, tdd-worker, standards-enforcer, devils-advocate, and security-trio agents that would otherwise vanish (HCF plan-tasks change file state, not Claude Code's TaskUpdate, so the TaskCompleted hook doesn't fire on them).
+
+Strict 2-episode cap per fire (subagent fires are frequent — over-writing here clogs the graph). Hard triage: pure-lookup subagents (Explore, general-purpose for read-only enumeration) exit `nothing worth saving`; clean PASS verdicts from reviewers also exit. Only writes when the subagent surfaced a non-obvious finding, a pushback that drove a change, a vendor verdict, or a runbook step learned the hard way.
+
+Citation: `claude-code-session://<session_id> [subagent-stop <subagent_type> <YYYY-MM-DD>]` — preserves both the parent session AND which subagent surfaced the fact.
+
+### Hook bypass of Hard Rule 1
+
+PreCompact / SessionEnd / TaskCompleted / SubagentStop all auto-write without prompting. This bypasses the [graphiti-usage skill's Hard Rule 1](skills/graphiti-usage/SKILL.md) (which requires user confirmation before any add_memory call). The rule still applies to add_memory calls Claude makes mid-conversation; it only carves out for non-interactive hook contexts.
 
 ### Disabling the hooks
 
