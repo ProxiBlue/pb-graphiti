@@ -95,7 +95,7 @@ def format_recall(project_id: str | None, nodes: list[dict]) -> str:
     if not nodes:
         return ""
     lines: list[str] = []
-    scope_str = f"project={project_id} + fleet" if project_id else "fleet"
+    scope_str = f"project={project_id} + fleet" if project_id else "host + fleet"
     lines.append(f"## Graphiti recall ({scope_str})")
     lines.append("")
     lines.append(f"Top {len(nodes)} relevant facts from prior sessions:")
@@ -124,7 +124,12 @@ def main() -> int:
 
     cwd = Path.cwd()
     project_id = resolve_project_id(cwd)
-    group_ids = [project_id, "fleet"] if project_id else ["fleet"]
+    # From a project: search [project, fleet] — surfaces project-local facts +
+    # genuine cross-project methodology, no host-ops noise.
+    # From the host (no project): search [host, fleet] — surfaces host agent's
+    # own operational memory (plugin internals, ingest tuning, fleet-mgmt) plus
+    # the same fleet methodology layer.
+    group_ids = [project_id, "fleet"] if project_id else ["host", "fleet"]
 
     pinned_episodes: list[dict] = []
     nodes: list[dict] = []

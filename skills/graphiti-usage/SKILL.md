@@ -7,19 +7,23 @@ description: Discipline for writing to and reading from the shared Graphiti temp
 
 Shared temporal knowledge graph reached via the `graphiti` MCP server (default `http://host.docker.internal:8765/mcp/`). One host instance backs all projects; namespacing is enforced **per call** via `group_id` — there is no automatic project isolation.
 
-## Scope model — two tiers
+## Scope model — three tiers
 
 Every fact has a SCOPE. Pick at write time:
 
 | Scope | `group_id` value | What goes here |
 |---|---|---|
-| **fleet** | the literal string `"fleet"` | Cross-project rules, tool-use defaults, methodology, vendor decisions that apply anywhere, organisation-wide policy |
+| **fleet** | the literal string `"fleet"` | TRUE cross-project methodology: tool-use rules, vendor verdicts that apply everywhere, organisation-wide policy. Should be valuable in an unrelated client project tomorrow. |
+| **host** | the literal string `"host"` | Host-side agent operations: pb-graphiti plugin internals, ingest tuning (SEMAPHORE, MAX_EPISODE_CHARS), fleet-mgmt scripts, dotfiles, host config, agent-orchestration runbooks. Not relevant inside a project session. |
 | **project** | the project's stable id (e.g. `myapp`, `client-x-store`) | Project-specific quirks: LIVE-equivalent branch, project-only test commands, module-vendor decisions that don't generalise, per-client preferences |
 
 Resolve the project id deterministically:
 - DDEV: read `$DDEV_PROJECT` env var inside the container (set automatically).
 - Generic: `basename $(git rev-parse --show-toplevel)`.
+- Host with no project context (e.g. `~/workspace/` working with plugin internals or fleet-wide scripts): use `host`.
 - Never use `default`, `main`, session ids, or random suffixes.
+
+**Test for "is it fleet?":** would you want this fact auto-surfaced when you open Claude in an unrelated client project six months from now? If yes → fleet. If "only when I'm working on the pb-graphiti plugin itself" → `host`. If "only in this one project" → project id.
 
 ## Hard rules
 
@@ -27,20 +31,21 @@ Resolve the project id deterministically:
    Output ONE line in this exact form, then wait for confirmation:
 
    ```
-   Save to graph — scope: [fleet | project=<id>]. Reply g / p / correction.
+   Save to graph — scope: [fleet | host | project=<id>]. Reply g / h / p / correction.
    ```
 
-   - `g` (or `global` / `fleet`) → use `group_id="fleet"`.
+   - `g` (or `global` / `fleet`) → use `group_id="fleet"`. Apply the "is it fleet?" test above.
+   - `h` (or `host`) → use `group_id="host"`. Plugin internals, fleet-mgmt scripts, host config.
    - `p` (or `project`) → use the resolved project id.
    - Any other reply → treat as a correction; re-classify and re-confirm.
 
-   Default suggestion: project, unless the fact references multiple projects, names a tool/methodology, or codifies a policy that applies anywhere. When in doubt → ask.
+   Default suggestion: project from a DDEV/git context; host from `~/workspace/` with no project; fleet only when the fact passes the cross-project test.
 
-   **Exception:** the `PreCompact` consolidation hook shipped with this plugin runs non-interactively (no user is at the keyboard to confirm). It resolves scope deterministically from `$DDEV_PROJECT` → git toplevel basename → `fleet`, and writes without prompting. Hard Rule 1 applies to add_memory calls Claude makes mid-conversation, NOT to that hook.
+   **Exception:** the `PreCompact` / `TaskCompleted` consolidation hooks shipped with this plugin run non-interactively (no user at the keyboard). They resolve scope deterministically from `$DDEV_PROJECT` → git toplevel basename → `host`, and write without prompting. Hard Rule 1 applies to add_memory calls Claude makes mid-conversation, NOT to those hooks.
 
-2. **Always query BOTH scopes from a project context.** Use `group_ids: ["<project-id>", "fleet"]` on every `search_nodes` / `search_memory_facts` call. Surfaces fleet rules in every project without leaking project A's quirks into project B.
+2. **From a project context, query `["<project-id>", "fleet"]`.** Surfaces fleet methodology in every project without leaking project A's quirks into project B AND without pulling host-ops noise into project work.
 
-3. **From the host shell (no project context):** query `group_ids: ["fleet"]` only. Host sessions shouldn't see any project's local quirks unless the user names a project.
+3. **From the host shell (no project context), query `["host", "fleet"]`.** Surfaces host-side operational memory (plugin internals, ingest tuning, fleet-mgmt) alongside fleet methodology. Do NOT query `["fleet"]` alone — that misses the host tier.
 
 4. **Never query across all projects without explicit instruction.** A multi-project audit ("look across everything") is the only valid reason to omit the `group_ids` filter or enumerate every project's id.
 

@@ -449,11 +449,21 @@ The state files are the dedupe layer — they record which episodes have been su
 
 `backlog-cursor-<group>.json` (only present when `--backlog-mode` has run) holds the date the next backlog batch fetches BEFORE. Delete it to restart the back-catalogue walk from today.
 
-#### Fleet log viewer (optional)
+#### Fleet ingest dashboard + log viewer (optional)
 
-The graphiti-fleet `docker-compose.yml` ships a small nginx log-viewer (port 7475, host-only) that mounts `${PB_GRAPHITI_FLEET_LOGS:-~/.pb-graphiti-fleet-logs}` read-only. Visit http://localhost:7475 for an index page with cypher snippets + a `/logs/` directory browser.
+The graphiti-fleet `docker-compose.yml` ships a small nginx sidecar (port 7475, host-only) serving:
 
-To surface a project's runs there, export `PB_GRAPHITI_FLEET_LOGS=/path/on/host` in `$PB_GRAPHITI_ENV`. The wrappers tee each run into `$PB_GRAPHITI_FLEET_LOGS/<group_id>/<source>.log` in addition to the per-project log. For DDEV-resident crons, mount the host fleet-log dir into the web container first (a one-line `.ddev/docker-compose.fleet-logs.yaml` bind), then point the env var at the in-container path.
+| Path | What |
+|---|---|
+| `/` | **Dashboard SPA** — per-group cards (total / `+1h` / `+24h` / latest write), recent-activity feed (last 20 episodes), auto-refreshes every 60s. Counters tick green when they grow between refreshes — you literally see ingest progress. |
+| `/api/cypher` | POST-only read proxy to Neo4j. nginx envsubsts `NEO4J_BASIC_AUTH` into an `Authorization` header at container start, so the browser never sees credentials. Local-only (`127.0.0.1` bound). |
+| `/logs/` | Directory browser over `${PB_GRAPHITI_FLEET_LOGS:-~/.pb-graphiti-fleet-logs}` (read-only). Drill into a project's run logs from the dashboard. |
+
+Visit **http://localhost:7475** for the dashboard. Falls back to the static log browser at `/logs/` if you want the raw cron-run output.
+
+To surface a project's runs in the `/logs/` browser, export `PB_GRAPHITI_FLEET_LOGS=/path/on/host` in `$PB_GRAPHITI_ENV`. The wrappers tee each run into `$PB_GRAPHITI_FLEET_LOGS/<group_id>/<source>.log` in addition to the per-project log. For DDEV-resident crons, mount the host fleet-log dir into the web container first (a one-line `.ddev/docker-compose.fleet-logs.yaml` bind), then point the env var at the in-container path.
+
+For the dashboard's `/api/cypher` to work, graphiti-fleet's `.env` must include `NEO4J_BASIC_AUTH=$(printf 'neo4j:%s' "$NEO4J_PASSWORD" | base64)`. The dashboard returns blank cards if this env var is missing — check `docker logs graphiti-log-viewer` for 401 responses on `/api/cypher`.
 
 ## Storage & persistence (technical)
 
