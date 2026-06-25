@@ -152,6 +152,26 @@ def save_state(state_path: Path, state: dict[str, list[str]]) -> None:
     state_path.write_text(json.dumps(state, indent=2, sort_keys=True))
 
 
+def backlog_cursor_path(state_path: Path, group_id: str) -> Path:
+    return state_path.parent / f"backlog-cursor-{group_id}.json"
+
+
+def load_backlog_cursor(cursor_path: Path) -> datetime.date | None:
+    if not cursor_path.exists():
+        return None
+    try:
+        data = json.loads(cursor_path.read_text())
+        return datetime.date.fromisoformat(data["cursor"])
+    except (json.JSONDecodeError, KeyError, ValueError):
+        print(f"WARN: corrupt backlog cursor {cursor_path}, restarting from today", file=sys.stderr)
+        return None
+
+
+def save_backlog_cursor(cursor_path: Path, cursor: datetime.date) -> None:
+    cursor_path.parent.mkdir(parents=True, exist_ok=True)
+    cursor_path.write_text(json.dumps({"cursor": cursor.isoformat()}, indent=2))
+
+
 def normalize_subject(subj: str) -> str:
     """Strip Re:/Fwd: prefixes for subject-based thread grouping."""
     s = subj.strip()
@@ -749,7 +769,20 @@ def main() -> int:
                          "Default: no address filter. Strongly recommended for client mailboxes — see --require-relevance.")
     ap.add_argument("--require-relevance", action="store_true",
                     help="Refuse to run unless --addresses OR --include-keywords is non-empty. Safety against accidentally ingesting an entire mailbox.")
-    ap.add_argument("--since", required=True, help="YYYY-MM-DD — server-side SINCE filter")
+    ap.add_argument("--since", required=False, default=None,
+                    help="YYYY-MM-DD — server-side SINCE filter. Required UNLESS --backlog-mode is set.")
+    ap.add_argument("--max-threads", type=int, default=0,
+                    help="Hard cap on threads written this run. 0 (default) = unlimited. "
+                         "Useful with --backlog-mode to throttle backfill cost (e.g. 20/day).")
+    ap.add_argument("--backlog-mode", action="store_true",
+                    help="Walk mailbox newest→oldest using a per-group cursor file at "
+                         "<state-dir>/backlog-cursor-<group>.json. Ignores --since. Each run reads "
+                         "the cursor, fetches one window of --backlog-window-days BEFORE cursor, "
+                         "writes up to --max-threads (newest-first), then advances cursor to (oldest "
+                         "written msg date + 1 day) — or window start if nothing written.")
+    ap.add_argument("--backlog-window-days", type=int, default=30,
+                    help="Days per backlog window (default 30). Sparse mailboxes need bigger windows "
+                         "to find any messages per run; dense ones can use smaller.")
     # Content filters
     ap.add_argument("--include-keywords", default="",
                     help="Comma-separated — thread must contain at least one (case-insensitive substring)")
@@ -797,11 +830,17 @@ def main() -> int:
         print(f"ERROR: ${args.password_env} not set. Use an app password.", file=sys.stderr)
         return 2
 
-    try:
-        since_date = datetime.date.fromisoformat(args.since)
-    except ValueError:
-        print(f"ERROR: --since must be YYYY-MM-DD, got {args.since!r}", file=sys.stderr)
-        return 2
+    if args.backlog_mode:
+        since_date = None  # cursor is computed below
+    else:
+        if not args.since:
+            print("ERROR: --since YYYY-MM-DD is required (or use --backlog-mode)", file=sys.stderr)
+            return 2
+        try:
+            since_date = datetime.date.fromisoformat(args.since)
+        except ValueError:
+            print(f"ERROR: --since must be YYYY-MM-DD, got {args.since!r}", file=sys.stderr)
+            return 2
 
     include_kw = {k.strip() for k in args.include_keywords.split(",") if k.strip()} or None
     exclude_kw = {k.strip() for k in args.exclude_keywords.split(",") if k.strip()} or None
@@ -819,8 +858,22 @@ def main() -> int:
     # Split the date range into batches. Each batch opens its own IMAP
     # session so big mailboxes (Zoho closes the socket at ~2-3k messages,
     # Gmail similar) succeed instead of mid-fetch dying.
-    today = datetime.date.today() + datetime.timedelta(days=1)  # +1 so IMAP BEFORE includes today
-    chunks = date_chunks(since_date, today, args.batch_days)
+    cursor_path = backlog_cursor_path(state_path, args.group_id) if args.backlog_mode else None
+    backlog_window_start: datetime.date | None = None
+    if args.backlog_mode:
+        cursor = load_backlog_cursor(cursor_path)
+        if cursor is None:
+            cursor = datetime.date.today() + datetime.timedelta(days=1)  # +1 so BEFORE includes today
+        backlog_window_start = cursor - datetime.timedelta(days=args.backlog_window_days)
+        since_date = backlog_window_start
+        today = cursor
+        chunks = date_chunks(since_date, today, args.batch_days)
+        cap = f"max-threads={args.max_threads}" if args.max_threads > 0 else "uncapped"
+        print(f"[backlog] window [{since_date} → {today}] ({args.backlog_window_days}d), {cap}, "
+              f"cursor={cursor_path}", file=sys.stderr)
+    else:
+        today = datetime.date.today() + datetime.timedelta(days=1)  # +1 so IMAP BEFORE includes today
+        chunks = date_chunks(since_date, today, args.batch_days)
     print(f"splitting [{since_date} → {today}] into {len(chunks)} batch(es) of up to {args.batch_days} day(s); "
           f"workers={args.parallel_workers}", file=sys.stderr)
 
@@ -958,6 +1011,13 @@ def main() -> int:
     summary = (" (filtered: " + ", ".join(summary_parts) + ")") if summary_parts else ""
     print(f"plan: {len(plan)} thread(s) to write to group_id={args.group_id!r}{summary}")
 
+    # Backlog mode: sort newest-first BEFORE capping so the cap drops oldest first.
+    if args.backlog_mode:
+        plan.sort(key=lambda ep: ep["reference_time"], reverse=True)
+    if args.max_threads > 0 and len(plan) > args.max_threads:
+        print(f"capping plan to --max-threads={args.max_threads} (dropped {len(plan) - args.max_threads} older thread(s))")
+        plan = plan[: args.max_threads]
+
     if args.dry_run:
         for ep in plan[:15]:
             print(f"  - {ep['name']} ({len(ep['body'])} chars)")
@@ -1010,9 +1070,16 @@ def main() -> int:
             print(f"\nSuggestions written to: {suggestions_path}")
             print(f"Review + edit that file, then pass to the live run:")
             print(f"  --exclude-list-file {suggestions_path}")
+        print("WRITTEN=0")
         return 0
     if not plan:
         print("nothing to do (all up to date)")
+        # Advance backlog cursor a full window back so the next run probes
+        # older mail; otherwise we'd spin on an empty window forever.
+        if args.backlog_mode and cursor_path is not None and backlog_window_start is not None:
+            save_backlog_cursor(cursor_path, backlog_window_start)
+            print(f"[backlog] cursor advanced to {backlog_window_start} (empty window)", file=sys.stderr)
+        print("WRITTEN=0")
         return 0
 
     client = GraphitiClient(args.url)
@@ -1053,6 +1120,7 @@ def main() -> int:
 
     written = 0
     failed = 0
+    oldest_written_ref: datetime.date | None = None
     for ep in plan:
         try:
             client.add_memory(
@@ -1066,6 +1134,14 @@ def main() -> int:
             )
             seen.add(ep["hash"])
             written += 1
+            try:
+                ep_date = datetime.datetime.fromisoformat(
+                    ep["reference_time"].replace("Z", "+00:00")
+                ).date()
+                if oldest_written_ref is None or ep_date < oldest_written_ref:
+                    oldest_written_ref = ep_date
+            except (ValueError, AttributeError):
+                pass
             print(f"  + {ep['name']}")
             state[args.group_id] = sorted(seen)
             save_state(state_path, state)
@@ -1074,6 +1150,17 @@ def main() -> int:
             print(f"  ! {ep['name']}: {e}", file=sys.stderr)
 
     print(f"\ndone: wrote {written}, failed {failed}")
+    print(f"WRITTEN={written}")
+
+    if args.backlog_mode and cursor_path is not None:
+        if oldest_written_ref is not None:
+            new_cursor = oldest_written_ref + datetime.timedelta(days=1)
+        else:
+            new_cursor = backlog_window_start
+        if new_cursor is not None:
+            save_backlog_cursor(cursor_path, new_cursor)
+            print(f"[backlog] cursor advanced to {new_cursor}", file=sys.stderr)
+
     return 0 if failed == 0 else 1
 
 

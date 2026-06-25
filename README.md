@@ -150,6 +150,24 @@ Top 8 relevant facts from prior sessions:
 
 **To pin a fact:** call `add_memory(group_id="initial_ingest", name="...", episode_body="...", source_description="...")` via the graphiti MCP from any session. There's no slash-command wrapper yet — write directly.
 
+A second SessionStart hook runs alongside the Graphiti recall — see "Dual-source recall policy" below.
+
+### Dual-source recall policy (disk + Graphiti)
+
+Claude Code already has a per-project file-based auto-memory at `~/.claude/projects/<sanitized-cwd>/memory/`. pb-graphiti does NOT replace it — the two stores carry different content:
+
+- **Disk auto-memory** — project TODOs, feedback rules, user profile. Stable, slow-changing, what-to-do-next oriented.
+- **Graphiti** — consolidated session episodes from PreCompact + TaskCompleted hooks. Operational/procedural facts, what-happened-when, cross-session continuity.
+
+Neither is a superset. When the user asks to recall past work ("recall last session", "what did we remember about X"), the correct move is to query **both**, then reconcile.
+
+To make this consistent across sessions, the plugin ships a second SessionStart hook (`scripts/session_start_disk_memory_nudge.sh`) that:
+
+1. Always injects a one-line policy reminder that recall is dual-source.
+2. If the disk auto-memory dir has `*.md` files modified in the last 7 days (excluding `MEMORY.md`), also injects a count + the latest filename, so the user knows recall is worth invoking.
+
+Auto-memory dir is resolved as `$HOME/.claude/projects/<sanitized-cwd>/memory/` (the Claude Code default), or via `$CLAUDE_AUTO_MEMORY_DIR` if set.
+
 ### TaskCompleted hook — per-task consolidation
 
 Fires every time a TaskUpdate sets a task to `status=completed`. The hook agent reviews the recent task-relevant slice of the transcript and writes any worthwhile facts to Graphiti (capped at 3 episodes per fire — task scope is narrow). Most task completions are trivial ("list files", "syntax check"), so most fires output `nothing worth saving` and exit cheap.
@@ -258,6 +276,14 @@ Workflow: dry-run → review file → comment out false positives → re-run dry
 
 `--since YYYY-MM-DD` is a server-side IMAP filter; `--min-words` to drop auto-replies (default 10); `--min-thread-messages` to drop one-offs. Code-entity suppression on by default (same rationale as tickets).
 
+#### Slow-trickle back-catalogue mode
+
+`--backlog-mode --max-threads N` walks the mailbox newest→oldest using a per-group cursor file at `<state-dir>/backlog-cursor-<group>.json`. Each invocation fetches one window of `--backlog-window-days` (default 30) BEFORE the cursor, sorts surviving threads newest-first, writes up to N, then advances the cursor to (oldest-written-msg-date + 1 day). If the window has no survivors the cursor jumps a full window back so empty months don't stall progress.
+
+Designed to pair with the cron wrapper: forward pass first, backlog only fires when the forward pass wrote 0. That gives steady backfill on quiet days, zero overhead on busy days. Default cap = 20 threads/run (`PB_BACKLOG_PER_DAY`), default window = 30 days (`PB_BACKLOG_WINDOW_DAYS`). Set `PB_BACKLOG_DISABLE=1` to opt out.
+
+Ignore `--since` when this flag is set — it's overridden by the cursor. State + dedupe file is still the regular `email.json`; backlog and forward share the same "already written" set, so they can't double-write a thread.
+
 #### Batching for large mailboxes
 
 A single IMAP session can only fetch so many messages before the provider drops the socket (Zoho closes around 2,000-3,000 messages; Gmail similar; Microsoft varies). For back-fills covering more than a few months, use:
@@ -362,7 +388,12 @@ Run `/pb-graphiti:automate` for an interactive setup. It detects whether you're 
 - Resolve the group_id automatically: `$PB_GRAPHITI_GROUP_ID` → `$DDEV_PROJECT` → `basename $(git rev-parse --show-toplevel)` → error if none
 - Compute `--since` from `LOOKBACK_DAYS` (cross-platform date math — works on Linux GNU date and macOS BSD date)
 - Write dedupe state to a stable location (`$HOME/.pb-graphiti/state/<source>.json`) so cron-from-arbitrary-cwd doesn't lose state
-- Log to `$HOME/.pb-graphiti/logs/<source>.log` with timestamps
+- Log to `$HOME/.pb-graphiti/logs/<source>.log` with timestamps (also mirrored to the fleet log dir when `PB_GRAPHITI_FLEET_LOGS` is set — see below)
+
+The email wrapper runs in two phases per invocation:
+
+1. **Forward pass** — fetches the last `LOOKBACK_DAYS` days (default 7), dedupe handles overlap.
+2. **Backlog pass** — fires only when the forward pass wrote 0 threads. Walks the mailbox newest→oldest using `--backlog-mode` and the per-group cursor file, capped at `PB_BACKLOG_PER_DAY` (default 20) threads per run. Set `PB_BACKLOG_DISABLE=1` to disable.
 
 Recommended schedule:
 
@@ -415,6 +446,14 @@ $HOME/.pb-graphiti/
 ```
 
 The state files are the dedupe layer — they record which episodes have been successfully written. A cron run that finds "nothing new" is a no-op except for the IMAP/GitHub fetch overhead. To force a clean re-ingest, delete the relevant state file or pass `--reingest` on a manual run.
+
+`backlog-cursor-<group>.json` (only present when `--backlog-mode` has run) holds the date the next backlog batch fetches BEFORE. Delete it to restart the back-catalogue walk from today.
+
+#### Fleet log viewer (optional)
+
+The graphiti-fleet `docker-compose.yml` ships a small nginx log-viewer (port 7475, host-only) that mounts `${PB_GRAPHITI_FLEET_LOGS:-~/.pb-graphiti-fleet-logs}` read-only. Visit http://localhost:7475 for an index page with cypher snippets + a `/logs/` directory browser.
+
+To surface a project's runs there, export `PB_GRAPHITI_FLEET_LOGS=/path/on/host` in `$PB_GRAPHITI_ENV`. The wrappers tee each run into `$PB_GRAPHITI_FLEET_LOGS/<group_id>/<source>.log` in addition to the per-project log. For DDEV-resident crons, mount the host fleet-log dir into the web container first (a one-line `.ddev/docker-compose.fleet-logs.yaml` bind), then point the env var at the in-container path.
 
 ## Storage & persistence (technical)
 

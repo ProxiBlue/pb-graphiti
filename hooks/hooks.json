@@ -9,6 +9,11 @@
             "timeout": 15,
             "statusMessage": "Recalling Graphiti context...",
             "async": true
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/session_start_disk_memory_nudge.sh\"",
+            "timeout": 5
           }
         ]
       }

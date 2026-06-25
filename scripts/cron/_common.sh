@@ -52,21 +52,49 @@ pb_log() {
 # Wrapper entry — call this from each per-source script after setting LOG_NAME.
 # Handles env-file sourcing, log redirection, state dir, and the "before
 # running" boilerplate.
+#
+# If PB_GRAPHITI_FLEET_LOGS is set and writable, also tees into
+# $PB_GRAPHITI_FLEET_LOGS/<group_id>/<log_name>.log so the graphiti-fleet
+# nginx log-viewer (http://localhost:7475) can surface this project's runs.
 pb_init() {
     local log_name="${1:-pb-graphiti}"
     mkdir -p "$PB_GRAPHITI_HOME/state" "$PB_GRAPHITI_HOME/logs"
 
-    # Redirect everything from this point on into the log file too
-    exec > >(tee -a "$PB_GRAPHITI_HOME/logs/${log_name}.log") 2>&1
+    # Build tee target list: primary per-project log, plus fleet mirror if
+    # configured. Source the env file BEFORE resolving fleet mirror so the
+    # env can export PB_GRAPHITI_FLEET_LOGS.
+    if [ -f "$PB_GRAPHITI_ENV" ]; then
+        # shellcheck disable=SC1090
+        set -a; source "$PB_GRAPHITI_ENV"; set +a
+    fi
+
+    local primary_log="$PB_GRAPHITI_HOME/logs/${log_name}.log"
+    local tee_targets=("$primary_log")
+
+    if [ -n "${PB_GRAPHITI_FLEET_LOGS:-}" ]; then
+        local group_id
+        group_id=$(resolve_group_id 2>/dev/null || true)
+        if [ -n "$group_id" ]; then
+            local fleet_dir="$PB_GRAPHITI_FLEET_LOGS/$group_id"
+            if mkdir -p "$fleet_dir" 2>/dev/null && [ -w "$fleet_dir" ]; then
+                tee_targets+=("$fleet_dir/${log_name}.log")
+            fi
+        fi
+    fi
+
+    # Redirect everything from this point on into all tee targets.
+    exec > >(tee -a "${tee_targets[@]}") 2>&1
 
     pb_log "==== ${log_name} START ===="
 
     if [ -f "$PB_GRAPHITI_ENV" ]; then
-        # shellcheck disable=SC1090
-        set -a; source "$PB_GRAPHITI_ENV"; set +a
         pb_log "loaded env from $PB_GRAPHITI_ENV"
     else
         pb_log "WARN: $PB_GRAPHITI_ENV not present — credentials must come from the cron env"
+    fi
+
+    if [ ${#tee_targets[@]} -gt 1 ]; then
+        pb_log "fleet-log mirror: ${tee_targets[1]}"
     fi
 }
 
