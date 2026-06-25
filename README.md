@@ -202,9 +202,32 @@ Citation: `claude-code-session://<session_id> [subagent-stop <subagent_type> <YY
 
 PreCompact / SessionEnd / TaskCompleted / SubagentStop all auto-write without prompting. This bypasses the [graphiti-usage skill's Hard Rule 1](skills/graphiti-usage/SKILL.md) (which requires user confirmation before any add_memory call). The rule still applies to add_memory calls Claude makes mid-conversation; it only carves out for non-interactive hook contexts.
 
+### How hook loading actually works (post-install verification)
+
+Plugin hooks **load automatically** — you do not edit `~/.claude/settings.json` to wire them. Claude Code reads `hooks/hooks.json` from each active plugin's install dir (`~/.claude/plugins/cache/<plugin>/<version>/hooks/hooks.json`) at session start and merges those entries into its hook registry alongside whatever is in `settings.json`.
+
+So a freshly-installed pb-graphiti starts firing SessionStart / PreCompact / TaskCompleted / SessionEnd / SubagentStop with zero post-install wiring. If they're not firing, the issue is one of these (NOT "you forgot to wire them"):
+
+1. **Session was started BEFORE the plugin install or update.** Hook lists are cached at session start — no hot-reload. After `claude plugin install pb-graphiti@pb-graphiti` (or update), `/quit` and restart Claude Code. Then check.
+2. **Plugin is not enabled in the current project.** Run `/plugin list` — pb-graphiti should be listed as active. If not, install/enable it for that project context. DDEV-resident sessions enable per-container (`ddev exec claude plugin install pb-graphiti@pb-graphiti`).
+3. **Claude Code version pre-dates a specific hook type.** SessionStart / PreCompact / TaskCompleted have been around for many releases; SessionEnd and SubagentStop are newer. Update Claude Code itself if a specific hook silently does nothing — the older binary may not know that hook name.
+4. **Diagnosis looked in `~/.claude/settings.json` only.** Plugin hooks live in the plugin's own dir (path above), not in settings.json. A `grep` of settings.json will never show plugin hooks. Use `/plugin show pb-graphiti` (or inspect the cache dir directly) to see what the plugin offers.
+
+To verify which hooks are actually live in a session:
+
+```bash
+# from a Claude Code session shell
+cat ~/.claude/plugins/cache/pb-graphiti/*/hooks/hooks.json | jq '.hooks | keys'
+# expected: ["PreCompact","SessionEnd","SessionStart","SubagentStop","TaskCompleted"]
+```
+
+### Manual wiring fallback (rarely needed)
+
+If you're on a Claude Code build where plugin-hook auto-load is genuinely broken, you can copy the entries out of the plugin's `hooks/hooks.json` into `~/.claude/settings.json` directly. They'll then load from settings.json instead — at the cost of needing to re-sync after every plugin update. This should be a last resort; the auto-load is the supported path.
+
 ### Disabling the hooks
 
-If you want recall but not consolidation, or vice versa, edit `~/.claude/settings.json`:
+To turn one off without uninstalling the plugin, edit `~/.claude/settings.json`:
 
 ```json
 {
@@ -215,7 +238,7 @@ If you want recall but not consolidation, or vice versa, edit `~/.claude/setting
 }
 ```
 
-Or disable both entirely with `"disableAllHooks": true` (kills hooks from every plugin, not just this one).
+Or disable hooks from every plugin with `"disableAllHooks": true`.
 
 ## Bulk ingestion — folders, Slack, Magento modules, GitHub tickets, IMAP email
 
