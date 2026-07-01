@@ -2,7 +2,7 @@
 
 Cross-session, cross-project memory for Claude Code via [Graphiti](https://github.com/getzep/graphiti) + Neo4j, exposed as an MCP server.
 
-<img width="900" height="838" alt="image" src="https://github.com/user-attachments/assets/0622100c-3003-430c-9567-f3f8342d17e6" />
+<img width="450" height="419" alt="image" src="https://github.com/user-attachments/assets/0622100c-3003-430c-9567-f3f8342d17e6" />
 
 
 Different from Claude Code's built-in per-project `~/.claude/projects/.../memory/`:
